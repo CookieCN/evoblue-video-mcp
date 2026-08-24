@@ -1,0 +1,2 @@
+"""MCP client configuration adapters."""
+

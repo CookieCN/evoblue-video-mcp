@@ -1,0 +1,45 @@
+{
+  "project": "EvoBlue Video MCP",
+  "updated": "2026-08-25",
+  "modules": {
+    "p0_foundation": {
+      "name": "P0 Harness, contracts, and skeleton",
+      "status": "done",
+      "features": [
+        {"id": "P0-001", "name": "Harness infrastructure", "status": "done"},
+        {"id": "P0-002", "name": "Product and architecture contracts", "status": "done"},
+        {"id": "P0-003", "name": "MCP tool and job state contracts", "status": "done"},
+        {"id": "P0-004", "name": "Markdown and WebUI contracts", "status": "done"},
+        {"id": "P0-005", "name": "Backend and frontend skeleton", "status": "done"},
+        {"id": "P0-006", "name": "Baseline CI and tests", "status": "done"}
+      ]
+    },
+    "p1_engine_core": {
+      "name": "P1 SQLite job model, migration, and single-owner lease",
+      "status": "done",
+      "features": [
+        {"id": "P1-001", "name": "SQLite schema init + versioned migration", "status": "done"},
+        {"id": "P1-002", "name": "Job state-machine transition rules", "status": "done"},
+        {"id": "P1-003", "name": "Atomic single-owner lease claim", "status": "done"},
+        {"id": "P1-004", "name": "Crash + lease-expiry recovery", "status": "done"},
+        {"id": "P1-005", "name": "Terminal-state re-execution guard", "status": "done"},
+        {"id": "P1-006", "name": "Offline unit/integration tests", "status": "done"}
+      ]
+    },
+    "delivery_roadmap": {
+      "name": "Post-P0 delivery phases",
+      "status": "planned",
+      "features": [
+        {"id": "P1", "name": "Local Engine, SQLite, Worker, WebUI framework", "status": "in_progress"},
+        {"id": "P2", "name": "YouTube/Bilibili subtitle analysis loop", "status": "planned"},
+        {"id": "P3", "name": "History, Markdown, FTS5, index rebuild", "status": "planned"},
+        {"id": "P4", "name": "STDIO MCP Bridge and four clients", "status": "planned"},
+        {"id": "P5", "name": "WebUI MCP configuration and handshake", "status": "planned"},
+        {"id": "P6", "name": "Faster-Whisper model management and recovery", "status": "planned"},
+        {"id": "P7", "name": "Windows installer and GitHub Release", "status": "planned"},
+        {"id": "P8", "name": "Public testing and Harness hardening", "status": "planned"}
+      ]
+    }
+  },
+  "summary": {"done": 12, "in_progress": 1, "planned": 7, "completion_pct": 60.0}
+}
