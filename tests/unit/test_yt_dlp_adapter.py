@@ -143,7 +143,8 @@ async def test_fetch_metadata_download_error(monkeypatch) -> None:
             return False
 
         def extract_info(self, url, download=False):
-            raise yt_dlp.utils.DownloadError("boom", exc_info=ConnectionError("refused"))
+            exc = ConnectionError("refused")
+            raise yt_dlp.utils.DownloadError("boom", exc_info=(type(exc), exc, None))
 
     monkeypatch.setattr(
         "evoblue_video_mcp.platforms.yt_dlp_adapter.yt_dlp.YoutubeDL", _RaisingYdl
@@ -220,8 +221,9 @@ async def test_permanent_download_error_not_retryable(monkeypatch) -> None:
             return False
 
         def extract_info(self, url, download=False):
+            exc = yt_dlp.utils.ExtractorError("private video")
             raise yt_dlp.utils.DownloadError(
-                "video unavailable", exc_info=yt_dlp.utils.ExtractorError("private video")
+                "video unavailable", exc_info=(type(exc), exc, None)
             )
 
     monkeypatch.setattr(

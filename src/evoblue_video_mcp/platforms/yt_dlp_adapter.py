@@ -175,8 +175,10 @@ def _is_retryable_download_error(exc: Any) -> bool:
     anything we cannot classify are treated as non-retryable by default.
     """
     cause = getattr(exc, "exc_info", None)
-    if isinstance(cause, OSError):
+    # yt-dlp stores exc_info as a sys.exc_info() tuple: (type, value, traceback).
+    exc_value = cause[1] if isinstance(cause, tuple) and len(cause) >= 2 else cause
+    if isinstance(exc_value, OSError):
         return True
-    if isinstance(cause, urllib.error.URLError):
-        return isinstance(cause.reason, OSError)
+    if isinstance(exc_value, urllib.error.URLError):
+        return isinstance(exc_value.reason, OSError)
     return False
