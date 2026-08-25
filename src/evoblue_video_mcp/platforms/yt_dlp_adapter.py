@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import httpx
 import yt_dlp  # type: ignore[import-untyped]
+import yt_dlp.utils  # type: ignore[import-untyped]
 
 from evoblue_video_mcp.platforms.base import (
     METADATA_FETCH_FAILED,
@@ -21,6 +22,10 @@ from evoblue_video_mcp.platforms.models import (
 from evoblue_video_mcp.transcript.parser import parse_srt, parse_vtt
 
 _PREFERRED_LANGS = ["zh-Hans", "zh-CN", "zh", "en"]
+# yt-dlp exposes many subtitle formats; only these two are parsed today.
+_SUPPORTED_SUBTITLE_EXTS = ("vtt", "srt")
+# HTTP statuses that are worth retrying (rate-limit, server hiccup, gateways).
+_RETRYABLE_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
 
 
 class YtDlpAdapter:
@@ -33,7 +38,11 @@ class YtDlpAdapter:
         return ref.platform in (Platform.YOUTUBE, Platform.BILIBILI)
 
     async def fetch_metadata(self, ref: VideoRef) -> VideoMetadata:
-        info = await asyncio.to_thread(self._extract_info, ref)
+        try:
+            info = await asyncio.to_thread(self._extract_info, ref)
+        except yt_dlp.utils.DownloadError as exc:
+            raise AdapterError(METADATA_FETCH_FAILED, str(exc), retryable=True) from exc
+
         title = str(info.get("title") or "")
         if not title:
             raise AdapterError(METADATA_FETCH_FAILED, "yt-dlp returned no title")
@@ -47,14 +56,25 @@ class YtDlpAdapter:
         )
 
     async def fetch_transcript(self, ref: VideoRef) -> Transcript:
-        info = await asyncio.to_thread(self._extract_info, ref)
+        try:
+            info = await asyncio.to_thread(self._extract_info, ref)
+        except yt_dlp.utils.DownloadError as exc:
+            raise AdapterError(SUBTITLE_UNAVAILABLE, str(exc), retryable=True) from exc
+
         picked = self._pick_subtitle_url(info)
         if picked is None:
-            raise AdapterError(SUBTITLE_UNAVAILABLE, "no subtitles available", retryable=False)
+            raise AdapterError(
+                SUBTITLE_UNAVAILABLE, "no supported subtitles available", retryable=False
+            )
 
         url, ext, lang = picked
         raw = await self._download(url)
-        segments = self._parse(raw, ext)
+        try:
+            segments = self._parse(raw, ext)
+        except ValueError as exc:
+            raise AdapterError(
+                SUBTITLE_UNAVAILABLE, f"subtitle format invalid: {exc}", retryable=False
+            ) from exc
         if not segments:
             raise AdapterError(SUBTITLE_UNAVAILABLE, "subtitle text was empty", retryable=False)
         return Transcript(
@@ -72,14 +92,25 @@ class YtDlpAdapter:
             return cast(dict[str, Any], ydl.extract_info(ref.url, download=False))
 
     async def _download(self, url: str) -> str:
-        if self._http_client is not None:
-            resp = await self._http_client.get(url)
+        try:
+            if self._http_client is not None:
+                resp = await self._http_client.get(url)
+            else:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url)
             resp.raise_for_status()
             return resp.text
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return resp.text
+        except httpx.HTTPStatusError as exc:
+            retryable = exc.response.status_code in _RETRYABLE_STATUSES
+            raise AdapterError(
+                SUBTITLE_UNAVAILABLE,
+                f"subtitle download failed: HTTP {exc.response.status_code}",
+                retryable=retryable,
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise AdapterError(
+                SUBTITLE_UNAVAILABLE, "subtitle download timed out", retryable=True
+            ) from exc
 
     def _pick_subtitle_url(self, info: dict[str, Any]) -> tuple[str, str, str] | None:
         for source_key in ("subtitles", "automatic_captions"):
@@ -101,13 +132,15 @@ class YtDlpAdapter:
 
 
 def _pick_from(entries: Any, lang: str) -> tuple[str, str, str] | None:
+    """Pick the first supported subtitle format (vtt/srt) from a language's entries."""
     if not entries:
         return None
-    entry = entries[0]
-    url = entry.get("url")
-    if not url:
-        return None
-    return url, entry.get("ext") or "vtt", lang
+    for entry in entries:
+        url = entry.get("url")
+        ext = entry.get("ext")
+        if url and ext in _SUPPORTED_SUBTITLE_EXTS:
+            return url, ext, lang
+    return None
 
 
 def _as_optional_float(value: Any) -> float | None:

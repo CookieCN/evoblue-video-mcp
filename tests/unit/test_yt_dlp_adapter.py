@@ -2,8 +2,13 @@
 
 import httpx
 import pytest
+import yt_dlp.utils
 
-from evoblue_video_mcp.platforms.base import SUBTITLE_UNAVAILABLE, AdapterError
+from evoblue_video_mcp.platforms.base import (
+    METADATA_FETCH_FAILED,
+    SUBTITLE_UNAVAILABLE,
+    AdapterError,
+)
 from evoblue_video_mcp.platforms.models import Platform, VideoRef
 from evoblue_video_mcp.platforms.yt_dlp_adapter import YtDlpAdapter
 
@@ -91,3 +96,95 @@ async def test_fetch_transcript_unavailable(patch_ytdlp) -> None:
     with pytest.raises(AdapterError) as exc:
         await adapter.fetch_transcript(ref)
     assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+
+
+def _mock_status_client(status_code: int) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _mock_timeout_client() -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("timeout")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_prefers_vtt_over_json3(patch_ytdlp) -> None:
+    info = {
+        "title": "T",
+        "subtitles": {
+            "en": [
+                {"url": "https://example.com/sub.json3", "ext": "json3"},
+                {"url": "https://example.com/sub.vtt", "ext": "vtt"},
+            ],
+        },
+    }
+    patch_ytdlp(info)
+    adapter = YtDlpAdapter(http_client=_mock_client(VTT_TEXT))
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    transcript = await adapter.fetch_transcript(ref)
+    assert transcript.language == "en"
+    assert len(transcript.segments) == 2
+
+
+async def test_fetch_metadata_download_error(monkeypatch) -> None:
+    class _RaisingYdl:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            raise yt_dlp.utils.DownloadError("boom")
+
+    monkeypatch.setattr(
+        "evoblue_video_mcp.platforms.yt_dlp_adapter.yt_dlp.YoutubeDL", _RaisingYdl
+    )
+    adapter = YtDlpAdapter()
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.fetch_metadata(ref)
+    assert exc.value.error_code == METADATA_FETCH_FAILED
+    assert exc.value.retryable is True
+
+
+async def test_fetch_transcript_http_429_is_retryable(patch_ytdlp) -> None:
+    patch_ytdlp()
+    adapter = YtDlpAdapter(http_client=_mock_status_client(429))
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.fetch_transcript(ref)
+    assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.retryable is True
+
+
+async def test_fetch_transcript_timeout_is_retryable(patch_ytdlp) -> None:
+    patch_ytdlp()
+    adapter = YtDlpAdapter(http_client=_mock_timeout_client())
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.fetch_transcript(ref)
+    assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.retryable is True
+
+
+async def test_fetch_transcript_bad_format_is_not_retryable(patch_ytdlp) -> None:
+    patch_ytdlp()
+    adapter = YtDlpAdapter(http_client=_mock_client("WEBVTT\n\nnot-a-time --> 00:02.000\nhello\n"))
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.fetch_transcript(ref)
+    assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.retryable is False
