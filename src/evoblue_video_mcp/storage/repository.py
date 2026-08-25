@@ -12,7 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from evoblue_video_mcp.jobs.states import TERMINAL_JOB_STATUSES, JobStatus
 from evoblue_video_mcp.jobs.transitions import RUNNING_STATES, validate_transition
-from evoblue_video_mcp.storage.models import AppSettings, Job
+from evoblue_video_mcp.storage.models import AppSettings, Job, JobArtifact
 
 _TERMINAL_VALUES = [state.value for state in TERMINAL_JOB_STATUSES]
 _RUNNING_VALUES = [state.value for state in RUNNING_STATES]
@@ -400,3 +400,96 @@ async def save_app_settings(
     if settings is None:
         raise RuntimeError("App settings vanished after write")
     return settings
+
+
+async def commit_artifact_and_advance(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    owner: str,
+    to_status: JobStatus,
+    now: float,
+    lease_seconds: float,
+    stage: str,
+    artifact_type: str,
+    input_fingerprint: str,
+    schema_version: int,
+    storage_kind: str,
+    payload_json: str | None = None,
+    relative_path: str | None = None,
+    content_hash: str | None = None,
+    byte_size: int | None = None,
+    progress: int | None = None,
+) -> Job:
+    """Register a stage artifact and advance the job in one transaction.
+
+    The artifact row and the CAS job update commit together, so a crash cannot
+    leave an artifact without state advancement or the reverse. Re-registering
+    an existing ``(job_id, artifact_type, input_fingerprint)`` is a no-op.
+    """
+    job = await _get(session, job_id)
+    if job is None:
+        raise KeyError(f"No job with id {job_id!r}")
+
+    validate_transition(JobStatus(job.status), to_status)
+
+    existing = (
+        await session.scalars(
+            select(JobArtifact).where(
+                JobArtifact.job_id == job_id,
+                JobArtifact.artifact_type == artifact_type,
+                JobArtifact.input_fingerprint == input_fingerprint,
+            )
+        )
+    ).first()
+    if existing is None:
+        session.add(
+            JobArtifact(
+                job_id=job_id,
+                stage=stage,
+                artifact_type=artifact_type,
+                input_fingerprint=input_fingerprint,
+                schema_version=schema_version,
+                storage_kind=storage_kind,
+                payload_json=payload_json,
+                relative_path=relative_path,
+                content_hash=content_hash,
+                byte_size=byte_size,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    new_stage = to_status.value if to_status in RUNNING_STATES else job.stage
+    advance_values: dict[str, object] = {
+        "status": to_status.value,
+        "stage": new_stage,
+        "progress": job.progress if progress is None else progress,
+        "updated_at": now,
+    }
+    if to_status in TERMINAL_JOB_STATUSES:
+        advance_values["lease_owner"] = None
+        advance_values["lease_expires_at"] = None
+    else:
+        advance_values["lease_expires_at"] = now + lease_seconds
+
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == job.status,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(advance_values)
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise LeaseLostError(
+            f"Lease lost for job {job_id!r}; owner {owner!r} no longer holds a live lease"
+        )
+
+    await session.commit()
+    return await _get_required(session, job_id)
