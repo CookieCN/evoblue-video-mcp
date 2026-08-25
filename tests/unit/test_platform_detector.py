@@ -57,3 +57,17 @@ def test_youtube_missing_video_id_is_rejected() -> None:
     with pytest.raises(PlatformError) as exc:
         detect_video("https://www.youtube.com/watch")
     assert exc.value.error_code == INVALID_URL
+
+
+def test_youtube_urls_normalize_to_canonical() -> None:
+    canonical = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert detect_video("https://youtu.be/dQw4w9WgXcQ").url == canonical
+    assert detect_video("https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=30").url == canonical
+    assert detect_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ").url == canonical
+
+
+def test_bilibili_url_normalizes_to_canonical() -> None:
+    assert (
+        detect_video("https://www.bilibili.com/video/BV1xx411c7mD").url
+        == "https://www.bilibili.com/video/BV1xx411c7mD"
+    )

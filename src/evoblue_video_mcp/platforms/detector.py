@@ -20,8 +20,17 @@ _YOUTUBE_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "
 _BILIBILI_HOSTS = frozenset({"bilibili.com", "www.bilibili.com", "m.bilibili.com"})
 
 
+def canonical_url(platform: Platform, video_id: str) -> str:
+    """Return the canonical URL for a resolved video."""
+    if platform is Platform.YOUTUBE:
+        return f"https://www.youtube.com/watch?v={video_id}"
+    if platform is Platform.BILIBILI:
+        return f"https://www.bilibili.com/video/{video_id}"
+    raise PlatformError(UNSUPPORTED_PLATFORM, f"no canonical URL for {platform}")
+
+
 def detect_video(url: str) -> VideoRef:
-    """Resolve ``url`` to a ``VideoRef``, or raise ``PlatformError`` with a stable code."""
+    """Resolve ``url`` to a ``VideoRef`` with a canonical URL, or raise ``PlatformError``."""
     try:
         parsed = urlparse(url)
     except ValueError as exc:
@@ -32,9 +41,11 @@ def detect_video(url: str) -> VideoRef:
 
     host = parsed.hostname.lower()
     if host in _YOUTUBE_HOSTS:
-        return VideoRef(Platform.YOUTUBE, _youtube_video_id(parsed), url)
+        video_id = _youtube_video_id(parsed)
+        return VideoRef(Platform.YOUTUBE, video_id, canonical_url(Platform.YOUTUBE, video_id))
     if host in _BILIBILI_HOSTS:
-        return VideoRef(Platform.BILIBILI, _bilibili_video_id(parsed), url)
+        video_id = _bilibili_video_id(parsed)
+        return VideoRef(Platform.BILIBILI, video_id, canonical_url(Platform.BILIBILI, video_id))
 
     raise PlatformError(UNSUPPORTED_PLATFORM, f"unsupported platform host: {host}")
 
