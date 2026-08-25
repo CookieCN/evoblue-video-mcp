@@ -301,6 +301,7 @@ async def mark_failure(
     error_code: str,
     retryable: bool,
     next_retry_at: float | None = None,
+    error_detail: str | None = None,
 ) -> Job:
     """Atomically fail a running job into ``retry_wait`` (transient) or ``failed`` (permanent)."""
     job = await _get(session, job_id)
@@ -322,6 +323,7 @@ async def mark_failure(
         .values(
             status=to_status.value,
             error_code=error_code,
+            error_detail=error_detail,
             retryable=retryable,
             next_retry_at=next_retry_at if retryable else None,
             lease_owner=None,
