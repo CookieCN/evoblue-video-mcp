@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     engine_host: Literal["127.0.0.1"] = "127.0.0.1"
     engine_port: int = Field(default=8765, ge=1024, le=65535)
+    # Random local access token protecting data endpoints; empty means auth is disabled
+    # (development only). Production generates one at engine startup.
+    local_access_token: str = ""
     telemetry_enabled: bool = False
 
 

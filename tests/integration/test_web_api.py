@@ -99,3 +99,42 @@ async def test_settings_roundtrip(
         resp = await client.get("/api/settings")
         assert resp.json()["setup_completed"] is True
         assert resp.json()["report_directory"] == "C:/reports"
+
+
+async def test_settings_explicit_null_clears_field(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(session_factory) as client:
+        await client.put(
+            "/api/settings",
+            json={"setup_completed": True, "report_directory": "C:/reports"},
+        )
+
+        # Explicit null clears the field; omitted fields keep their old value.
+        await client.put("/api/settings", json={"report_directory": None})
+        resp = await client.get("/api/settings")
+        assert resp.json()["report_directory"] is None
+        assert resp.json()["setup_completed"] is True
+
+
+async def test_local_token_protects_data_endpoints(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as sess:
+        await _enqueue(sess, job_id="j1")
+
+    app = create_app(session_factory=session_factory, local_token="secret-token")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # Data endpoints require the token.
+        assert (await client.get("/api/jobs")).status_code == 401
+        assert (
+            await client.get("/api/jobs", headers={"X-Local-Token": "wrong"})
+        ).status_code == 401
+        assert (
+            await client.get("/api/jobs", headers={"X-Local-Token": "secret-token"})
+        ).status_code == 200
+
+        # Health stays token-exempt.
+        assert (await client.get("/api/health")).status_code == 200

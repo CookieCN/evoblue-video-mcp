@@ -3,7 +3,7 @@
 import time
 from typing import Literal, TypedDict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
@@ -61,12 +61,16 @@ def _to_detail(job: Job) -> JobDetailResponse:
 def create_app(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    local_token: str | None = None,
 ) -> FastAPI:
     """Create the Local Engine HTTP application.
 
-    Data endpoints attach when a session factory is given.
+    Data endpoints attach when a session factory is given. When ``local_token``
+    (or ``Settings.local_access_token``) is set, data endpoints require it via the
+    ``X-Local-Token`` header; ``/api/health`` stays token-exempt.
     """
     app_settings = settings or Settings()
+    token = local_token if local_token is not None else app_settings.local_access_token
     app = FastAPI(title=app_settings.app_name, version=__version__)
 
     @app.get("/api/health", response_model=HealthResponse)
@@ -74,15 +78,21 @@ def create_app(
         return {"status": "ok", "service": app_settings.app_name, "version": __version__}
 
     if session_factory is not None:
-        _register_data_endpoints(app, session_factory)
+        _register_data_endpoints(app, session_factory, token)
 
     return app
 
 
 def _register_data_endpoints(
-    app: FastAPI, session_factory: async_sessionmaker[AsyncSession]
+    app: FastAPI, session_factory: async_sessionmaker[AsyncSession], token: str
 ) -> None:
-    @app.get("/api/jobs", response_model=JobListResponse)
+    async def require_local_token(x_local_token: str | None = Header(default=None)) -> None:
+        if token and x_local_token != token:
+            raise HTTPException(status_code=401, detail="invalid local access token")
+
+    dependencies = [Depends(require_local_token)] if token else []
+
+    @app.get("/api/jobs", response_model=JobListResponse, dependencies=dependencies)
     async def jobs_list(
         limit: int = Query(default=20, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
@@ -97,7 +107,7 @@ def _register_data_endpoints(
             offset=offset,
         )
 
-    @app.get("/api/jobs/{job_id}", response_model=JobDetailResponse)
+    @app.get("/api/jobs/{job_id}", response_model=JobDetailResponse, dependencies=dependencies)
     async def job_detail(job_id: str) -> JobDetailResponse:
         async with session_factory() as sess:
             job = await get_job(sess, job_id=job_id)
@@ -105,7 +115,7 @@ def _register_data_endpoints(
             raise HTTPException(status_code=404, detail="job not found")
         return _to_detail(job)
 
-    @app.get("/api/settings", response_model=AppSettingsResponse)
+    @app.get("/api/settings", response_model=AppSettingsResponse, dependencies=dependencies)
     async def settings_get() -> AppSettingsResponse:
         async with session_factory() as sess:
             current = await get_app_settings(sess)
@@ -118,10 +128,11 @@ def _register_data_endpoints(
             llm_model=current.llm_model,
         )
 
-    @app.put("/api/settings", response_model=AppSettingsResponse)
+    @app.put("/api/settings", response_model=AppSettingsResponse, dependencies=dependencies)
     async def settings_put(payload: AppSettingsUpdate) -> AppSettingsResponse:
         async with session_factory() as sess:
             current = await get_app_settings(sess)
+            fields = payload.model_fields_set
             saved = await save_app_settings(
                 sess,
                 setup_completed=(
@@ -132,17 +143,17 @@ def _register_data_endpoints(
                 now=time.time(),
                 report_directory=(
                     payload.report_directory
-                    if payload.report_directory is not None
+                    if "report_directory" in fields
                     else (current.report_directory if current else None)
                 ),
                 llm_provider=(
                     payload.llm_provider
-                    if payload.llm_provider is not None
+                    if "llm_provider" in fields
                     else (current.llm_provider if current else None)
                 ),
                 llm_model=(
                     payload.llm_model
-                    if payload.llm_model is not None
+                    if "llm_model" in fields
                     else (current.llm_model if current else None)
                 ),
             )

@@ -30,9 +30,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      # P0 has no generated lockfile because frontend registry access was unavailable.
-      # Add and review package-lock.json in P1, then switch this step to npm ci.
-      - run: npm install
+      - run: npm ci
       - run: npm run lint
       - run: npm run test -- --run
       - run: npm run build

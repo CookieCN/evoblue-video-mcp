@@ -28,8 +28,6 @@ P0、P1 已完成：SQLite Job 模型与迁移、状态机转换规则、单 Wor
 
 ## 已知问题
 
-- 后端依赖与验证已完成；当前执行环境拒绝连接 npm registry，前端依赖安装及 lint/test/build 标记为 `SKIP_ENVIRONMENT`。
-- `package-lock.json` 尚未生成，CI 暂不切回 `npm ci`。
 - MCP Python SDK v2 为当前稳定线，真正接入放在 P4；P0 仅定义与 SDK 解耦的业务 Schema。
 
 ## 阶段路线图
