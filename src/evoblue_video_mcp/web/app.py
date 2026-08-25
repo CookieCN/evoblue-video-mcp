@@ -1,5 +1,6 @@
 """Local Engine FastAPI factory."""
 
+import secrets
 import time
 from typing import Literal, TypedDict
 
@@ -71,6 +72,8 @@ def create_app(
     """
     app_settings = settings or Settings()
     token = local_token if local_token is not None else app_settings.local_access_token
+    if app_settings.environment == "production" and not token:
+        raise RuntimeError("local access token is required in production")
     app = FastAPI(title=app_settings.app_name, version=__version__)
 
     @app.get("/api/health", response_model=HealthResponse)
@@ -87,7 +90,9 @@ def _register_data_endpoints(
     app: FastAPI, session_factory: async_sessionmaker[AsyncSession], token: str
 ) -> None:
     async def require_local_token(x_local_token: str | None = Header(default=None)) -> None:
-        if token and x_local_token != token:
+        if not token:
+            return
+        if x_local_token is None or not secrets.compare_digest(x_local_token, token):
             raise HTTPException(status_code=401, detail="invalid local access token")
 
     dependencies = [Depends(require_local_token)] if token else []

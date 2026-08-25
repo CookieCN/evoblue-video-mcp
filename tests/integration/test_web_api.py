@@ -1,8 +1,10 @@
 """Local Engine HTTP API: jobs observation and first-setup settings."""
 
 import httpx
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evoblue_video_mcp.config import Settings
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.storage.repository import enqueue_job
 from evoblue_video_mcp.web import create_app
@@ -138,3 +140,9 @@ async def test_local_token_protects_data_endpoints(
 
         # Health stays token-exempt.
         assert (await client.get("/api/health")).status_code == 200
+
+
+def test_production_requires_local_token() -> None:
+    settings = Settings(environment="production", local_access_token="")
+    with pytest.raises(RuntimeError):
+        create_app(settings=settings)
