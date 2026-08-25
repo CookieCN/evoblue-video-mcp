@@ -18,6 +18,7 @@ P0、P1 已完成：SQLite Job 模型与迁移、状态机转换规则、单 Wor
 - [x] 新增 WebUI 后端 API：`/api/jobs`（列表/详情）与 `/api/settings`（GET/PUT），支持依赖注入 session factory。
 - [x] 新增前端路由骨架：首页任务列表 + 首次设置页 + Vite `/api` 代理到 loopback Engine（依赖装不上，标记 SKIP_ENVIRONMENT）。
 - [x] 覆盖迁移幂等、Worker 循环、启动恢复与 Web API 的单元/集成测试（48 passed）。
+- [x] 新增平台字幕获取第一步：平台数据模型、URL 检测（YouTube/Bilibili）、`PlatformAdapter` 协议、VTT/SRT 解析器、yt-dlp 适配器（元数据 + 字幕，测试 mock 无网络）。
 
 ## 待做（优先级排序）
 

@@ -13,6 +13,7 @@
 - 新增 Engine 启动恢复（`runtime/engine.py`）：`recover_on_startup` 释放过期租约并失败耗尽重试。
 - 新增 AppSettings 模型与迁移 v2（精确 per-table 迁移），`list_jobs` 与设置 get/save repository。
 - 新增 WebUI 后端 API（`/api/jobs` 列表/详情、`/api/settings` GET/PUT）与前端路由骨架（任务列表 + 首次设置 + Vite loopback 代理）。
+- 新增平台字幕获取（`platforms/`）：URL 检测、`PlatformAdapter` 协议、yt-dlp 适配器（元数据 + 字幕）、VTT/SRT 解析器。
 
 ### Changed
 
