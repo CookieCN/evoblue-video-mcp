@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-P0 已完成。P1 第一个最小闭环已完成：SQLite Job 模型、版本化迁移、状态机转换规则、单 Worker 租约领取与崩溃恢复。尚未实现 Worker 执行循环、Engine 启动扫描接线与 WebUI。
+P0 已完成。P1 核心已就绪：SQLite Job 模型、版本化迁移、状态机转换规则、单 Worker 租约领取与崩溃恢复、Worker 执行循环骨架与 Engine 启动恢复。尚未实现 WebUI 与真实视频 Pipeline。
 
 ## 最近完成
 
@@ -11,17 +11,17 @@ P0 已完成。P1 第一个最小闭环已完成：SQLite Job 模型、版本化
 - [x] 新增 SQLite 持久层 `storage/`：`Job` ORM 模型、版本化迁移（`schema_migrations` + `SCHEMA_VERSION=1`）、异步 engine（WAL + busy timeout）。
 - [x] 新增单 Worker 租约 `storage/repository.py`：原子 compare-and-swap 领取、乐观锁、租约过期接管、终止态保护、恢复扫描。
 - [x] 修复审查发现的 4 个 P1 缺陷：`advance_job` 增加租约 CAS 校验（旧 Worker 无法推进）、`max_attempts` 生效并原子转 failed、`recover_stale_jobs` 原子化（不覆盖新租约）、Repository 返回不依赖 `expire_on_commit=False`。
-- [x] 覆盖状态转换、并发领取、崩溃恢复、终止态、租约易主、重试上限与迁移幂等的单元/集成测试（36 passed）。
+- [x] 新增 Worker 执行循环骨架 `runtime/worker.py`：`claim → 阶段 handler 注入 → 连续推进到终止/retry_wait/failed`，阶段处理器可插拔（P2 填真实 pipeline）。
+- [x] 新增 Engine 启动恢复 `runtime/engine.py`：`recover_on_startup` 释放过期租约 + 耗尽重试原子转 failed。
+- [x] 覆盖状态转换、并发领取、崩溃恢复、终止态、租约易主、重试上限、Worker 循环与启动恢复的单元/集成测试（45 passed）。
 
 ## 待做（优先级排序）
 
 | # | 事项 | 优先级 | 阶段 |
 |---|---|---|---|
-| 1 | Worker 执行循环：领取后真正跑 pipeline 阶段（先写 DB 再副作用） | P0 | P1 |
-| 2 | Engine 启动时扫描并接线 `recover_stale_jobs`（恢复器） | P0 | P1 |
-| 3 | 建立 WebUI 路由与首次设置状态机 | P1 | P1 |
-| 4 | 实现 YouTube/Bilibili 字幕获取适配器 | P2 | P2 |
-| 5 | 统一 MCP 返回 Envelope：`docs/MCP_TOOLS.md` 的 `ok` 字段与 Pydantic 输出模型不一致 | P2 | P4 |
+| 1 | 建立 WebUI 路由与首次设置状态机 | P1 | P1 |
+| 2 | 实现 YouTube/Bilibili 字幕获取适配器 | P2 | P2 |
+| 3 | 统一 MCP 返回 Envelope：`docs/MCP_TOOLS.md` 的 `ok` 字段与 Pydantic 输出模型不一致 | P2 | P4 |
 
 ## 已知问题
 

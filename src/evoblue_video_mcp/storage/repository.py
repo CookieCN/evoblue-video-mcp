@@ -231,6 +231,19 @@ async def advance_job(
     elif to_status in RUNNING_STATES:
         new_stage = to_status.value
 
+    advance_values: dict[str, object] = {
+        "status": to_status.value,
+        "stage": new_stage,
+        "progress": job.progress if progress is None else progress,
+        "updated_at": now,
+    }
+    if to_status in TERMINAL_JOB_STATUSES:
+        # Reaching a terminal state releases the lease; the job is no longer owned.
+        advance_values["lease_owner"] = None
+        advance_values["lease_expires_at"] = None
+    else:
+        advance_values["lease_expires_at"] = now + lease_seconds
+
     result = await session.execute(
         update(Job)
         .where(
@@ -240,13 +253,7 @@ async def advance_job(
             Job.lease_expires_at.is_not(None),
             Job.lease_expires_at > now,
         )
-        .values(
-            status=to_status.value,
-            stage=new_stage,
-            progress=job.progress if progress is None else progress,
-            lease_expires_at=now + lease_seconds,
-            updated_at=now,
-        )
+        .values(advance_values)
         .returning(Job.id)
     )
     if result.scalar_one_or_none() is None:
@@ -283,3 +290,51 @@ async def fail_exhausted_retries(session: AsyncSession, *, now: float) -> list[J
     if not ids:
         return []
     return list((await session.scalars(select(Job).where(Job.id.in_(ids)))).all())
+
+
+async def mark_failure(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    owner: str,
+    now: float,
+    error_code: str,
+    retryable: bool,
+    next_retry_at: float | None = None,
+) -> Job:
+    """Atomically fail a running job into ``retry_wait`` (transient) or ``failed`` (permanent)."""
+    job = await _get(session, job_id)
+    if job is None:
+        raise KeyError(f"No job with id {job_id!r}")
+
+    to_status = JobStatus.RETRY_WAIT if retryable else JobStatus.FAILED
+    validate_transition(JobStatus(job.status), to_status)
+
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == job.status,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(
+            status=to_status.value,
+            error_code=error_code,
+            retryable=retryable,
+            next_retry_at=next_retry_at if retryable else None,
+            lease_owner=None,
+            lease_expires_at=None,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise LeaseLostError(
+            f"Lease lost for job {job_id!r}; owner {owner!r} no longer holds a live lease"
+        )
+
+    await session.commit()
+    return await _get_required(session, job_id)

@@ -9,6 +9,8 @@
 - 新增状态机转换规则（`jobs/transitions.py`），非法转换抛 `TransitionError`。
 - 新增单 Worker 租约闭环（`storage/repository.py`）：原子 compare-and-swap 领取、乐观锁、租约过期接管与恢复。
 - 新增覆盖状态转换、并发领取、崩溃恢复、终止态保护与迁移幂等的测试。
+- 新增 Worker 执行循环骨架（`runtime/worker.py`）：`StageOutcome`/`StageHandler` 协议与 `run_worker_once` 连续推进。
+- 新增 Engine 启动恢复（`runtime/engine.py`）：`recover_on_startup` 释放过期租约并失败耗尽重试。
 
 ### Changed
 

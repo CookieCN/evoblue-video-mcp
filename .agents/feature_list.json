@@ -23,7 +23,9 @@
         {"id": "P1-003", "name": "Atomic single-owner lease claim", "status": "done"},
         {"id": "P1-004", "name": "Crash + lease-expiry recovery", "status": "done"},
         {"id": "P1-005", "name": "Terminal-state re-execution guard", "status": "done"},
-        {"id": "P1-006", "name": "Offline unit/integration tests", "status": "done"}
+        {"id": "P1-006", "name": "Offline unit/integration tests", "status": "done"},
+        {"id": "P1-007", "name": "Worker execution loop skeleton", "status": "done"},
+        {"id": "P1-008", "name": "Engine startup recovery", "status": "done"}
       ]
     },
     "delivery_roadmap": {
@@ -41,5 +43,5 @@
       ]
     }
   },
-  "summary": {"done": 12, "in_progress": 1, "planned": 7, "completion_pct": 60.0}
+  "summary": {"done": 14, "in_progress": 1, "planned": 7, "completion_pct": 63.6}
 }
