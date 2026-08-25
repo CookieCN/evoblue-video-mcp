@@ -1,6 +1,7 @@
 """yt-dlp based adapter for YouTube and Bilibili metadata and subtitles."""
 
 import asyncio
+import urllib.error
 from typing import Any, cast
 
 import httpx
@@ -41,7 +42,9 @@ class YtDlpAdapter:
         try:
             info = await asyncio.to_thread(self._extract_info, ref)
         except yt_dlp.utils.DownloadError as exc:
-            raise AdapterError(METADATA_FETCH_FAILED, str(exc), retryable=True) from exc
+            raise AdapterError(
+                METADATA_FETCH_FAILED, str(exc), retryable=_is_retryable_download_error(exc)
+            ) from exc
 
         title = str(info.get("title") or "")
         if not title:
@@ -59,7 +62,9 @@ class YtDlpAdapter:
         try:
             info = await asyncio.to_thread(self._extract_info, ref)
         except yt_dlp.utils.DownloadError as exc:
-            raise AdapterError(SUBTITLE_UNAVAILABLE, str(exc), retryable=True) from exc
+            raise AdapterError(
+                SUBTITLE_UNAVAILABLE, str(exc), retryable=_is_retryable_download_error(exc)
+            ) from exc
 
         picked = self._pick_subtitle_url(info)
         if picked is None:
@@ -111,6 +116,10 @@ class YtDlpAdapter:
             raise AdapterError(
                 SUBTITLE_UNAVAILABLE, "subtitle download timed out", retryable=True
             ) from exc
+        except httpx.RequestError as exc:
+            raise AdapterError(
+                SUBTITLE_UNAVAILABLE, f"subtitle download failed: {exc}", retryable=True
+            ) from exc
 
     def _pick_subtitle_url(self, info: dict[str, Any]) -> tuple[str, str, str] | None:
         for source_key in ("subtitles", "automatic_captions"):
@@ -157,3 +166,17 @@ def _format_upload_date(value: Any) -> str | None:
     if len(text) != 8 or not text.isdigit():
         return None
     return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+
+
+def _is_retryable_download_error(exc: Any) -> bool:
+    """Return True when a yt-dlp DownloadError wraps a transient network failure.
+
+    Permanent errors (video removed, private, region-locked, login required) and
+    anything we cannot classify are treated as non-retryable by default.
+    """
+    cause = getattr(exc, "exc_info", None)
+    if isinstance(cause, OSError):
+        return True
+    if isinstance(cause, urllib.error.URLError):
+        return isinstance(cause.reason, OSError)
+    return False

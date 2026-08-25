@@ -143,7 +143,7 @@ async def test_fetch_metadata_download_error(monkeypatch) -> None:
             return False
 
         def extract_info(self, url, download=False):
-            raise yt_dlp.utils.DownloadError("boom")
+            raise yt_dlp.utils.DownloadError("boom", exc_info=ConnectionError("refused"))
 
     monkeypatch.setattr(
         "evoblue_video_mcp.platforms.yt_dlp_adapter.yt_dlp.YoutubeDL", _RaisingYdl
@@ -187,4 +187,50 @@ async def test_fetch_transcript_bad_format_is_not_retryable(patch_ytdlp) -> None
     with pytest.raises(AdapterError) as exc:
         await adapter.fetch_transcript(ref)
     assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.retryable is False
+
+
+def _mock_connect_error_client() -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_fetch_transcript_connect_error_is_retryable(patch_ytdlp) -> None:
+    patch_ytdlp()
+    adapter = YtDlpAdapter(http_client=_mock_connect_error_client())
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.fetch_transcript(ref)
+    assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.retryable is True
+
+
+async def test_permanent_download_error_not_retryable(monkeypatch) -> None:
+    class _PermanentYdl:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            raise yt_dlp.utils.DownloadError(
+                "video unavailable", exc_info=yt_dlp.utils.ExtractorError("private video")
+            )
+
+    monkeypatch.setattr(
+        "evoblue_video_mcp.platforms.yt_dlp_adapter.yt_dlp.YoutubeDL", _PermanentYdl
+    )
+    adapter = YtDlpAdapter()
+    ref = VideoRef(Platform.YOUTUBE, "abc", "https://youtu.be/abc")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.fetch_metadata(ref)
+    assert exc.value.error_code == METADATA_FETCH_FAILED
     assert exc.value.retryable is False
