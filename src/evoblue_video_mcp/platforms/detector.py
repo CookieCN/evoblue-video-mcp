@@ -1,5 +1,6 @@
 """Resolve a video URL to a platform and video id."""
 
+import re
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 from evoblue_video_mcp.platforms.models import Platform, VideoRef
@@ -18,6 +19,9 @@ class PlatformError(Exception):
 
 _YOUTUBE_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"})
 _BILIBILI_HOSTS = frozenset({"bilibili.com", "www.bilibili.com", "m.bilibili.com"})
+
+_YOUTUBE_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+_BILIBILI_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
 
 
 def canonical_url(platform: Platform, video_id: str) -> str:
@@ -52,19 +56,28 @@ def detect_video(url: str) -> VideoRef:
 
 def _youtube_video_id(parsed: ParseResult) -> str:
     parts = [p for p in parsed.path.split("/") if p]
+    video_id: str | None = None
     if parsed.hostname == "youtu.be" and parts:
-        return parts[0]
-    if parts and parts[0] == "shorts" and len(parts) >= 2:
-        return parts[1]
-    query = parse_qs(parsed.query)
-    values = query.get("v")
-    if values and values[0]:
-        return values[0]
-    raise PlatformError(INVALID_URL, "YouTube URL is missing a video id")
+        video_id = parts[0]
+    elif parts and parts[0] == "shorts" and len(parts) >= 2:
+        video_id = parts[1]
+    else:
+        query = parse_qs(parsed.query)
+        values = query.get("v")
+        video_id = values[0] if values else None
+
+    if video_id is None:
+        raise PlatformError(INVALID_URL, "YouTube URL is missing a video id")
+    if not _YOUTUBE_ID_RE.fullmatch(video_id):
+        raise PlatformError(INVALID_URL, "YouTube URL has an invalid video id")
+    return video_id
 
 
 def _bilibili_video_id(parsed: ParseResult) -> str:
     parts = [p for p in parsed.path.split("/") if p]
     if len(parts) >= 2 and parts[0] == "video":
-        return parts[1]
+        video_id = parts[1]
+        if _BILIBILI_BV_RE.fullmatch(video_id):
+            return video_id
+        raise PlatformError(INVALID_URL, "Bilibili URL has an invalid video id")
     raise PlatformError(INVALID_URL, "Bilibili URL is missing a video id")

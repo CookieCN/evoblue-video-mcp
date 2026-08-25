@@ -44,7 +44,7 @@ async def _enqueue(session: AsyncSession, job_id: str = "job-1") -> None:
         session,
         job_id=job_id,
         url="https://www.youtube.com/watch?v=abc",
-        idempotency_key=f"key-{job_id}",
+        request_fingerprint=f"key-{job_id}",
         config_fingerprint="fp-1",
         now=1000.0,
     )

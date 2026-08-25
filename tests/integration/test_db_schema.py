@@ -31,3 +31,16 @@ async def test_jobs_table_exists(engine: AsyncEngine) -> None:
             )
         ).scalar()
         assert row == "jobs"
+
+
+async def test_job_artifacts_table_exists(engine: AsyncEngine) -> None:
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='job_artifacts'"
+                )
+            )
+        ).scalar()
+        assert row == "job_artifacts"

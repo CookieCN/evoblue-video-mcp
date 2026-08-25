@@ -13,9 +13,9 @@ from typing import cast
 from sqlalchemy import Table, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from evoblue_video_mcp.storage.models import AppSettings, Job
+from evoblue_video_mcp.storage.models import AppSettings, Job, JobArtifact
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
@@ -28,9 +28,14 @@ async def _apply_v2(conn: AsyncConnection) -> None:
     await conn.run_sync(cast(Table, AppSettings.__table__).create, checkfirst=True)
 
 
+async def _apply_v3(conn: AsyncConnection) -> None:
+    await conn.run_sync(cast(Table, JobArtifact.__table__).create, checkfirst=True)
+
+
 _MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _apply_v1),
     (2, _apply_v2),
+    (3, _apply_v3),
 ]
 
 

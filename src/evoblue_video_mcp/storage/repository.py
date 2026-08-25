@@ -88,7 +88,7 @@ async def enqueue_job(
     *,
     job_id: str,
     url: str,
-    idempotency_key: str,
+    request_fingerprint: str,
     config_fingerprint: str,
     now: float,
     status: JobStatus = JobStatus.QUEUED,
@@ -102,7 +102,7 @@ async def enqueue_job(
     """Persist a new job in an initial (default ``queued``) state."""
     job = Job(
         job_id=job_id,
-        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
         url=url,
         mode=mode,
         asr=asr,

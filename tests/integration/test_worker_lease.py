@@ -33,7 +33,7 @@ async def _enqueue(
         session,
         job_id=job_id,
         url="https://www.youtube.com/watch?v=abc",
-        idempotency_key=f"key-{job_id}",
+        request_fingerprint=f"key-{job_id}",
         config_fingerprint="fp-1",
         now=now,
         status=status,
@@ -230,7 +230,7 @@ async def test_repository_safe_with_default_session(tmp_path) -> None:
                 sess,
                 job_id="j1",
                 url="https://www.youtube.com/watch?v=abc",
-                idempotency_key="k1",
+                request_fingerprint="k1",
                 config_fingerprint="fp",
                 now=1000.0,
             )

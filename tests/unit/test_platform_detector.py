@@ -24,15 +24,15 @@ def test_youtube_share_url() -> None:
 
 
 def test_youtube_shorts_url() -> None:
-    ref = detect_video("https://www.youtube.com/shorts/abc123XYZ")
+    ref = detect_video("https://www.youtube.com/shorts/dQw4w9WgXcQ")
     assert ref.platform is Platform.YOUTUBE
-    assert ref.video_id == "abc123XYZ"
+    assert ref.video_id == "dQw4w9WgXcQ"
 
 
 def test_youtube_mobile_url_with_query() -> None:
-    ref = detect_video("https://m.youtube.com/watch?v=abc123XYZ&t=30")
+    ref = detect_video("https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=30")
     assert ref.platform is Platform.YOUTUBE
-    assert ref.video_id == "abc123XYZ"
+    assert ref.video_id == "dQw4w9WgXcQ"
 
 
 def test_bilibili_video_url() -> None:
@@ -71,3 +71,15 @@ def test_bilibili_url_normalizes_to_canonical() -> None:
         detect_video("https://www.bilibili.com/video/BV1xx411c7mD").url
         == "https://www.bilibili.com/video/BV1xx411c7mD"
     )
+
+
+def test_youtube_invalid_video_id_rejected() -> None:
+    with pytest.raises(PlatformError) as exc:
+        detect_video("https://www.youtube.com/watch?v=tooshort")
+    assert exc.value.error_code == INVALID_URL
+
+
+def test_bilibili_invalid_video_id_rejected() -> None:
+    with pytest.raises(PlatformError) as exc:
+        detect_video("https://www.bilibili.com/video/av12345")
+    assert exc.value.error_code == INVALID_URL
