@@ -1,9 +1,9 @@
 """Job persistence and single-owner lease semantics.
 
-Every state change is written to SQLite before any side effect runs. Ownership
-is transferred with a compare-and-swap UPDATE guarded by the current status and
-lease, so a SQLite single-writer serializes concurrent claims and at most one
-worker wins a given job.
+Every state change is written to SQLite before any side effect runs. Ownership is
+transferred and advanced with compare-and-swap UPDATEs guarded by status, lease
+owner, and lease expiry, so a SQLite single-writer serializes concurrent access:
+at most one worker wins a claim, and only the current lease holder may advance it.
 """
 
 from sqlalchemy import and_, or_, select, update
@@ -17,12 +17,33 @@ from evoblue_video_mcp.storage.models import Job
 _TERMINAL_VALUES = [state.value for state in TERMINAL_JOB_STATUSES]
 _RUNNING_VALUES = [state.value for state in RUNNING_STATES]
 
+MAX_ATTEMPTS_EXCEEDED = "MAX_ATTEMPTS_EXCEEDED"
+
+
+class LeaseLostError(RuntimeError):
+    """Raised when a worker advances a job whose lease it no longer holds."""
+
 
 async def _get(session: AsyncSession, job_id: str) -> Job | None:
     return (await session.scalars(select(Job).where(Job.job_id == job_id))).first()
 
 
+async def get_job(session: AsyncSession, *, job_id: str) -> Job | None:
+    """Return the current persisted state of a job, or ``None`` if unknown."""
+    return await _get(session, job_id)
+
+
+async def _get_required(session: AsyncSession, job_id: str) -> Job:
+    """Return a job that must exist because we just wrote it."""
+    job = await _get(session, job_id)
+    if job is None:
+        raise RuntimeError(f"Persisted job {job_id!r} vanished after write")
+    return job
+
+
 def _is_claimable(job: Job, now: float) -> bool:
+    if job.attempt >= job.max_attempts:
+        return False
     status = JobStatus(job.status)
     if status in TERMINAL_JOB_STATUSES:
         return False
@@ -45,16 +66,19 @@ def _claim_status(job: Job) -> tuple[JobStatus, str | None]:
 
 
 def _claimable_where(now: float) -> ColumnElement[bool]:
-    return or_(
-        Job.status == JobStatus.QUEUED.value,
-        and_(
-            Job.status == JobStatus.RETRY_WAIT.value,
-            Job.next_retry_at.is_not(None),
-            Job.next_retry_at <= now,
-        ),
-        and_(
-            Job.status.in_(_RUNNING_VALUES),
-            or_(Job.lease_expires_at.is_(None), Job.lease_expires_at <= now),
+    return and_(
+        Job.attempt < Job.max_attempts,
+        or_(
+            Job.status == JobStatus.QUEUED.value,
+            and_(
+                Job.status == JobStatus.RETRY_WAIT.value,
+                Job.next_retry_at.is_not(None),
+                Job.next_retry_at <= now,
+            ),
+            and_(
+                Job.status.in_(_RUNNING_VALUES),
+                or_(Job.lease_expires_at.is_(None), Job.lease_expires_at <= now),
+            ),
         ),
     )
 
@@ -72,6 +96,8 @@ async def enqueue_job(
     asr: str = "auto",
     language: str | None = None,
     max_attempts: int = 3,
+    attempt: int = 0,
+    next_retry_at: float | None = None,
 ) -> Job:
     """Persist a new job in an initial (default ``queued``) state."""
     job = Job(
@@ -85,12 +111,14 @@ async def enqueue_job(
         status=status.value,
         stage=status.value if status in RUNNING_STATES else None,
         max_attempts=max_attempts,
+        attempt=attempt,
+        next_retry_at=next_retry_at,
         created_at=now,
         updated_at=now,
     )
     session.add(job)
     await session.commit()
-    return job
+    return await _get_required(session, job_id)
 
 
 async def claim_job(
@@ -161,52 +189,97 @@ async def claim_next_job(
 
 
 async def recover_stale_jobs(session: AsyncSession, *, now: float) -> list[Job]:
-    """Release leases that expired while a worker was gone, so jobs can be reclaimed."""
-    jobs = list(
-        (
-            await session.scalars(
-                select(Job).where(
-                    Job.lease_expires_at.is_not(None),
-                    Job.lease_expires_at <= now,
-                    Job.status.not_in(_TERMINAL_VALUES),
-                )
-            )
-        ).all()
+    """Atomically release leases that expired, without racing a fresh take-over."""
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at <= now,
+            Job.status.not_in(_TERMINAL_VALUES),
+        )
+        .values(lease_owner=None, lease_expires_at=None, updated_at=now)
+        .returning(Job.id)
     )
-    for job in jobs:
-        job.lease_owner = None
-        job.lease_expires_at = None
-        job.updated_at = now
-    if jobs:
-        await session.commit()
-    return jobs
+    ids = list(result.scalars().all())
+    await session.commit()
+    if not ids:
+        return []
+    return list((await session.scalars(select(Job).where(Job.id.in_(ids)))).all())
 
 
 async def advance_job(
     session: AsyncSession,
     *,
     job_id: str,
+    owner: str,
     to_status: JobStatus,
     now: float,
+    lease_seconds: float,
     stage: JobStatus | None = None,
     progress: int | None = None,
 ) -> Job:
-    """Validate then persist a state transition before any side effect runs."""
+    """Validate, then atomically advance a job only if ``owner`` still holds a live lease."""
     job = await _get(session, job_id)
     if job is None:
         raise KeyError(f"No job with id {job_id!r}")
 
-    src = JobStatus(job.status)
-    validate_transition(src, to_status)
+    validate_transition(JobStatus(job.status), to_status)
 
-    job.status = to_status.value
+    new_stage = job.stage
     if stage is not None:
-        job.stage = stage.value
+        new_stage = stage.value
     elif to_status in RUNNING_STATES:
-        job.stage = to_status.value
-    if progress is not None:
-        job.progress = progress
-    job.updated_at = now
+        new_stage = to_status.value
+
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == job.status,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(
+            status=to_status.value,
+            stage=new_stage,
+            progress=job.progress if progress is None else progress,
+            lease_expires_at=now + lease_seconds,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise LeaseLostError(
+            f"Lease lost for job {job_id!r}; owner {owner!r} no longer holds a live lease"
+        )
 
     await session.commit()
-    return job
+    return await _get_required(session, job_id)
+
+
+async def fail_exhausted_retries(session: AsyncSession, *, now: float) -> list[Job]:
+    """Atomically move retry_wait jobs whose attempts are exhausted into ``failed``."""
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.status == JobStatus.RETRY_WAIT.value,
+            Job.attempt >= Job.max_attempts,
+        )
+        .values(
+            status=JobStatus.FAILED.value,
+            error_code=MAX_ATTEMPTS_EXCEEDED,
+            retryable=False,
+            lease_owner=None,
+            lease_expires_at=None,
+            next_retry_at=None,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    ids = list(result.scalars().all())
+    await session.commit()
+    if not ids:
+        return []
+    return list((await session.scalars(select(Job).where(Job.id.in_(ids)))).all())

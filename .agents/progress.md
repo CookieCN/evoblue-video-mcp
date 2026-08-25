@@ -10,7 +10,8 @@ P0 已完成。P1 第一个最小闭环已完成：SQLite Job 模型、版本化
 - [x] 新增状态机转换规则 `jobs/transitions.py`：线性主链 + retry_wait 重入 + 终止态无出边，非法转换抛 `TransitionError`。
 - [x] 新增 SQLite 持久层 `storage/`：`Job` ORM 模型、版本化迁移（`schema_migrations` + `SCHEMA_VERSION=1`）、异步 engine（WAL + busy timeout）。
 - [x] 新增单 Worker 租约 `storage/repository.py`：原子 compare-and-swap 领取、乐观锁、租约过期接管、终止态保护、恢复扫描。
-- [x] 覆盖状态转换、并发领取、崩溃恢复、终止态与迁移幂等的单元/集成测试（32 passed）。
+- [x] 修复审查发现的 4 个 P1 缺陷：`advance_job` 增加租约 CAS 校验（旧 Worker 无法推进）、`max_attempts` 生效并原子转 failed、`recover_stale_jobs` 原子化（不覆盖新租约）、Repository 返回不依赖 `expire_on_commit=False`。
+- [x] 覆盖状态转换、并发领取、崩溃恢复、终止态、租约易主、重试上限与迁移幂等的单元/集成测试（36 passed）。
 
 ## 待做（优先级排序）
 
@@ -20,6 +21,7 @@ P0 已完成。P1 第一个最小闭环已完成：SQLite Job 模型、版本化
 | 2 | Engine 启动时扫描并接线 `recover_stale_jobs`（恢复器） | P0 | P1 |
 | 3 | 建立 WebUI 路由与首次设置状态机 | P1 | P1 |
 | 4 | 实现 YouTube/Bilibili 字幕获取适配器 | P2 | P2 |
+| 5 | 统一 MCP 返回 Envelope：`docs/MCP_TOOLS.md` 的 `ok` 字段与 Pydantic 输出模型不一致 | P2 | P4 |
 
 ## 已知问题
 

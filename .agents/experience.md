@@ -30,3 +30,12 @@
 **Solution**：乐观锁 UPDATE 改用 `.returning(Job.id)` + `scalar_one_or_none()` 判断是否命中，类型干净且能区分「未命中」与「命中」；SQLite 3.35+ 支持 UPDATE…RETURNING。
 
 **Rule**：用乐观锁 UPDATE 判断抢占是否成功时，优先 `.returning(主键)` + `scalar_one_or_none()`，不要依赖 `rowcount`。
+## 4. 租约推进与恢复必须原子 CAS，不能先读后写
+
+**Problem**：审查发现 `advance_job` 未校验租约、`recover_stale_jobs` 先 SELECT 后无条件 UPDATE，导致旧 Worker 能推进状态、恢复器覆盖新 Worker 的租约。
+
+**Root Cause**：把「状态/租约」当成可先读后改的普通字段，忽略了 SELECT 与 UPDATE 之间的并发窗口；ORM 的 dirty-check 提交按主键无条件覆盖。
+
+**Solution**：`advance_job` 用单条 `UPDATE ... WHERE lease_owner=:owner AND lease_expires_at > :now AND status=:old` 做 CAS，行数 0 即拒绝；`recover_stale_jobs` 用带 `lease_expires_at <= :now` 条件的原子 UPDATE 并返回受影响 id。
+
+**Rule**：凡涉及所有权（租约、锁、抢占）的状态推进与清理，必须单条带条件的 UPDATE/CAS 完成，禁止「先 SELECT 后按主键写」。

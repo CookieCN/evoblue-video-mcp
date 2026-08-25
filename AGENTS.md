@@ -7,8 +7,8 @@
 ## 当前阶段
 
 - 初始化日期：2026-08-24
-- 当前阶段：P0 — Harness、边界、合同、最小骨架
-- P0 仅定义可验证的架构合同和可导入骨架，不实现视频 Pipeline。
+- 当前阶段：P1 — Local Engine、SQLite、Worker、WebUI 框架
+- P1 已完成最小闭环：SQLite Job 模型、版本化迁移、单 Worker 租约与崩溃恢复。
 
 ## Owner Context
 
