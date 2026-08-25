@@ -1,5 +1,7 @@
 """yt-dlp adapter is tested against a fake extractor and mock HTTP transport (no network)."""
 
+import urllib.error
+
 import httpx
 import pytest
 import yt_dlp.utils
@@ -10,7 +12,10 @@ from evoblue_video_mcp.platforms.base import (
     AdapterError,
 )
 from evoblue_video_mcp.platforms.models import Platform, VideoRef
-from evoblue_video_mcp.platforms.yt_dlp_adapter import YtDlpAdapter
+from evoblue_video_mcp.platforms.yt_dlp_adapter import (
+    YtDlpAdapter,
+    _is_retryable_download_error,
+)
 
 FAKE_INFO = {
     "title": "Test Video",
@@ -236,3 +241,27 @@ async def test_permanent_download_error_not_retryable(monkeypatch) -> None:
         await adapter.fetch_metadata(ref)
     assert exc.value.error_code == METADATA_FETCH_FAILED
     assert exc.value.retryable is False
+
+
+def _dl_error(exc: BaseException) -> yt_dlp.utils.DownloadError:
+    return yt_dlp.utils.DownloadError("x", exc_info=(type(exc), exc, None))
+
+
+def test_http_404_not_retryable() -> None:
+    exc = urllib.error.HTTPError("https://x", 404, "Not Found", {}, None)
+    assert _is_retryable_download_error(_dl_error(exc)) is False
+
+
+def test_http_429_retryable() -> None:
+    exc = urllib.error.HTTPError("https://x", 429, "Too Many Requests", {}, None)
+    assert _is_retryable_download_error(_dl_error(exc)) is True
+
+
+def test_urlerror_string_reason_not_retryable() -> None:
+    exc = urllib.error.URLError("permanent reason")
+    assert _is_retryable_download_error(_dl_error(exc)) is False
+
+
+def test_connection_error_retryable() -> None:
+    exc = ConnectionError("refused")
+    assert _is_retryable_download_error(_dl_error(exc)) is True

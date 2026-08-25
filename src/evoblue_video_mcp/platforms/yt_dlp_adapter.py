@@ -177,8 +177,9 @@ def _is_retryable_download_error(exc: Any) -> bool:
     cause = getattr(exc, "exc_info", None)
     # yt-dlp stores exc_info as a sys.exc_info() tuple: (type, value, traceback).
     exc_value = cause[1] if isinstance(cause, tuple) and len(cause) >= 2 else cause
-    if isinstance(exc_value, OSError):
-        return True
+    # HTTPError < URLError < OSError: check most specific first.
+    if isinstance(exc_value, urllib.error.HTTPError):
+        return exc_value.code in _RETRYABLE_STATUSES
     if isinstance(exc_value, urllib.error.URLError):
         return isinstance(exc_value.reason, OSError)
-    return False
+    return isinstance(exc_value, OSError)
