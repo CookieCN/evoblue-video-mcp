@@ -8,23 +8,29 @@ new version instead of mutating an existing one in place.
 
 import time
 from collections.abc import Awaitable, Callable
+from typing import cast
 
-from sqlalchemy import text
+from sqlalchemy import Table, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from evoblue_video_mcp.storage.models import Base
+from evoblue_video_mcp.storage.models import AppSettings, Job
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
 
 async def _apply_v1(conn: AsyncConnection) -> None:
-    await conn.run_sync(Base.metadata.create_all)
+    await conn.run_sync(cast(Table, Job.__table__).create, checkfirst=True)
+
+
+async def _apply_v2(conn: AsyncConnection) -> None:
+    await conn.run_sync(cast(Table, AppSettings.__table__).create, checkfirst=True)
 
 
 _MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _apply_v1),
+    (2, _apply_v2),
 ]
 
 

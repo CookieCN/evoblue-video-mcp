@@ -21,4 +21,5 @@ frontend/coverage/
 *.tmp
 .DS_Store
 Thumbs.db
+.npm-cache/
 

@@ -37,3 +37,16 @@ class Job(Base):
 
     created_at: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)
+
+
+class AppSettings(Base):
+    """Single-row application settings; secrets live in the OS credential store, not here."""
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    setup_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    report_directory: Mapped[str | None] = mapped_column(String, nullable=True)
+    llm_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[float] = mapped_column(Float)

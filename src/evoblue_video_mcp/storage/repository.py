@@ -6,13 +6,13 @@ owner, and lease expiry, so a SQLite single-writer serializes concurrent access:
 at most one worker wins a claim, and only the current lease holder may advance it.
 """
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from evoblue_video_mcp.jobs.states import TERMINAL_JOB_STATUSES, JobStatus
 from evoblue_video_mcp.jobs.transitions import RUNNING_STATES, validate_transition
-from evoblue_video_mcp.storage.models import Job
+from evoblue_video_mcp.storage.models import AppSettings, Job
 
 _TERMINAL_VALUES = [state.value for state in TERMINAL_JOB_STATUSES]
 _RUNNING_VALUES = [state.value for state in RUNNING_STATES]
@@ -338,3 +338,65 @@ async def mark_failure(
 
     await session.commit()
     return await _get_required(session, job_id)
+
+
+async def list_jobs(
+    session: AsyncSession,
+    *,
+    limit: int,
+    offset: int,
+    status: JobStatus | None = None,
+) -> tuple[list[Job], int]:
+    """Return a page of jobs and the total count matching the optional status filter."""
+    filters: list[ColumnElement[bool]] = []
+    if status is not None:
+        filters.append(Job.status == status.value)
+
+    total = (
+        await session.scalar(select(func.count()).select_from(Job).where(*filters))
+    ) or 0
+    jobs = list(
+        (
+            await session.scalars(
+                select(Job)
+                .where(*filters)
+                .order_by(Job.created_at.desc(), Job.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
+    )
+    return jobs, int(total)
+
+
+async def get_app_settings(session: AsyncSession) -> AppSettings | None:
+    """Return the single app-settings row, or ``None`` before first setup."""
+    return (await session.scalars(select(AppSettings).where(AppSettings.id == 1))).first()
+
+
+async def save_app_settings(
+    session: AsyncSession,
+    *,
+    setup_completed: bool,
+    now: float,
+    report_directory: str | None = None,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+) -> AppSettings:
+    """Persist the single app-settings row (upsert); ``None`` fields clear the value."""
+    settings = await get_app_settings(session)
+    if settings is None:
+        settings = AppSettings(id=1)
+        session.add(settings)
+
+    settings.setup_completed = setup_completed
+    settings.report_directory = report_directory
+    settings.llm_provider = llm_provider
+    settings.llm_model = llm_model
+    settings.updated_at = now
+
+    await session.commit()
+    settings = await get_app_settings(session)
+    if settings is None:
+        raise RuntimeError("App settings vanished after write")
+    return settings

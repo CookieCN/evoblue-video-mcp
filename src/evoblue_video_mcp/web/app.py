@@ -1,11 +1,28 @@
 """Local Engine FastAPI factory."""
 
+import time
 from typing import Literal, TypedDict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
 from evoblue_video_mcp.config import Settings
+from evoblue_video_mcp.jobs import JobStatus
+from evoblue_video_mcp.storage.models import Job
+from evoblue_video_mcp.storage.repository import (
+    get_app_settings,
+    get_job,
+    list_jobs,
+    save_app_settings,
+)
+from evoblue_video_mcp.web.schemas import (
+    AppSettingsResponse,
+    AppSettingsUpdate,
+    JobDetailResponse,
+    JobListItem,
+    JobListResponse,
+)
 
 
 class HealthResponse(TypedDict):
@@ -14,9 +31,41 @@ class HealthResponse(TypedDict):
     version: str
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Create the Local Engine HTTP application without starting a server."""
+def _to_list_item(job: Job) -> JobListItem:
+    return JobListItem(
+        job_id=job.job_id,
+        status=job.status,
+        stage=job.stage,
+        progress=job.progress,
+        error_code=job.error_code,
+        created_at=job.created_at,
+    )
 
+
+def _to_detail(job: Job) -> JobDetailResponse:
+    return JobDetailResponse(
+        job_id=job.job_id,
+        status=job.status,
+        stage=job.stage,
+        progress=job.progress,
+        attempt=job.attempt,
+        max_attempts=job.max_attempts,
+        error_code=job.error_code,
+        error_detail=job.error_detail,
+        retryable=job.retryable,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
+
+
+def create_app(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> FastAPI:
+    """Create the Local Engine HTTP application.
+
+    Data endpoints attach when a session factory is given.
+    """
     app_settings = settings or Settings()
     app = FastAPI(title=app_settings.app_name, version=__version__)
 
@@ -24,5 +73,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> HealthResponse:
         return {"status": "ok", "service": app_settings.app_name, "version": __version__}
 
+    if session_factory is not None:
+        _register_data_endpoints(app, session_factory)
+
     return app
 
+
+def _register_data_endpoints(
+    app: FastAPI, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    @app.get("/api/jobs", response_model=JobListResponse)
+    async def jobs_list(
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        status: JobStatus | None = None,
+    ) -> JobListResponse:
+        async with session_factory() as sess:
+            items, total = await list_jobs(sess, limit=limit, offset=offset, status=status)
+        return JobListResponse(
+            items=[_to_list_item(job) for job in items],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/api/jobs/{job_id}", response_model=JobDetailResponse)
+    async def job_detail(job_id: str) -> JobDetailResponse:
+        async with session_factory() as sess:
+            job = await get_job(sess, job_id=job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return _to_detail(job)
+
+    @app.get("/api/settings", response_model=AppSettingsResponse)
+    async def settings_get() -> AppSettingsResponse:
+        async with session_factory() as sess:
+            current = await get_app_settings(sess)
+        if current is None:
+            return AppSettingsResponse(setup_completed=False)
+        return AppSettingsResponse(
+            setup_completed=current.setup_completed,
+            report_directory=current.report_directory,
+            llm_provider=current.llm_provider,
+            llm_model=current.llm_model,
+        )
+
+    @app.put("/api/settings", response_model=AppSettingsResponse)
+    async def settings_put(payload: AppSettingsUpdate) -> AppSettingsResponse:
+        async with session_factory() as sess:
+            current = await get_app_settings(sess)
+            saved = await save_app_settings(
+                sess,
+                setup_completed=(
+                    payload.setup_completed
+                    if payload.setup_completed is not None
+                    else (current.setup_completed if current else False)
+                ),
+                now=time.time(),
+                report_directory=(
+                    payload.report_directory
+                    if payload.report_directory is not None
+                    else (current.report_directory if current else None)
+                ),
+                llm_provider=(
+                    payload.llm_provider
+                    if payload.llm_provider is not None
+                    else (current.llm_provider if current else None)
+                ),
+                llm_model=(
+                    payload.llm_model
+                    if payload.llm_model is not None
+                    else (current.llm_model if current else None)
+                ),
+            )
+        return AppSettingsResponse(
+            setup_completed=saved.setup_completed,
+            report_directory=saved.report_directory,
+            llm_provider=saved.llm_provider,
+            llm_model=saved.llm_model,
+        )

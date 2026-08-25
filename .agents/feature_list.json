@@ -25,14 +25,15 @@
         {"id": "P1-005", "name": "Terminal-state re-execution guard", "status": "done"},
         {"id": "P1-006", "name": "Offline unit/integration tests", "status": "done"},
         {"id": "P1-007", "name": "Worker execution loop skeleton", "status": "done"},
-        {"id": "P1-008", "name": "Engine startup recovery", "status": "done"}
+        {"id": "P1-008", "name": "Engine startup recovery", "status": "done"},
+        {"id": "P1-009", "name": "WebUI API and first-setup skeleton", "status": "done"}
       ]
     },
     "delivery_roadmap": {
       "name": "Post-P0 delivery phases",
       "status": "planned",
       "features": [
-        {"id": "P1", "name": "Local Engine, SQLite, Worker, WebUI framework", "status": "in_progress"},
+        {"id": "P1", "name": "Local Engine, SQLite, Worker, WebUI framework", "status": "done"},
         {"id": "P2", "name": "YouTube/Bilibili subtitle analysis loop", "status": "planned"},
         {"id": "P3", "name": "History, Markdown, FTS5, index rebuild", "status": "planned"},
         {"id": "P4", "name": "STDIO MCP Bridge and four clients", "status": "planned"},
@@ -43,5 +44,5 @@
       ]
     }
   },
-  "summary": {"done": 14, "in_progress": 1, "planned": 7, "completion_pct": 63.6}
+  "summary": {"done": 16, "in_progress": 0, "planned": 7, "completion_pct": 69.6}
 }

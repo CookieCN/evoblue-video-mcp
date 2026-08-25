@@ -11,6 +11,8 @@
 - 新增覆盖状态转换、并发领取、崩溃恢复、终止态保护与迁移幂等的测试。
 - 新增 Worker 执行循环骨架（`runtime/worker.py`）：`StageOutcome`/`StageHandler` 协议与 `run_worker_once` 连续推进。
 - 新增 Engine 启动恢复（`runtime/engine.py`）：`recover_on_startup` 释放过期租约并失败耗尽重试。
+- 新增 AppSettings 模型与迁移 v2（精确 per-table 迁移），`list_jobs` 与设置 get/save repository。
+- 新增 WebUI 后端 API（`/api/jobs` 列表/详情、`/api/settings` GET/PUT）与前端路由骨架（任务列表 + 首次设置 + Vite loopback 代理）。
 
 ### Changed
 

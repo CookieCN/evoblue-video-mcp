@@ -20,7 +20,7 @@ async def test_init_db_is_idempotent(engine: AsyncEngine) -> None:
         versions = (
             await conn.execute(text("SELECT version FROM schema_migrations"))
         ).scalars().all()
-        assert versions == [SCHEMA_VERSION]
+        assert versions == list(range(1, SCHEMA_VERSION + 1))
 
 
 async def test_jobs_table_exists(engine: AsyncEngine) -> None:
