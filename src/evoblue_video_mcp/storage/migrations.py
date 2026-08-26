@@ -75,9 +75,6 @@ _JOBS_V3_REBUILD = [
         updated_at FLOAT NOT NULL
     )
     """,
-    "CREATE UNIQUE INDEX ix_jobs_job_id ON jobs_new (job_id)",
-    "CREATE INDEX ix_jobs_request_fingerprint ON jobs_new (request_fingerprint)",
-    "CREATE INDEX ix_jobs_status ON jobs_new (status)",
     """
     INSERT INTO jobs_new (
         id, job_id, request_fingerprint, url, mode, asr, language,
@@ -92,8 +89,12 @@ _JOBS_V3_REBUILD = [
         error_code, error_detail, retryable, created_at, updated_at
     FROM jobs
     """,
+    # Drop the old table (and its index names) before creating new indexes.
     "DROP TABLE jobs",
     "ALTER TABLE jobs_new RENAME TO jobs",
+    "CREATE UNIQUE INDEX ix_jobs_job_id ON jobs (job_id)",
+    "CREATE INDEX ix_jobs_request_fingerprint ON jobs (request_fingerprint)",
+    "CREATE INDEX ix_jobs_status ON jobs (status)",
 ]
 
 

@@ -1,5 +1,6 @@
 """Pipeline stage handlers for metadata and subtitle acquisition."""
 
+import errno
 import hashlib
 import json
 
@@ -101,7 +102,11 @@ class FetchingSubtitlesHandler:
         content_hash = hashlib.sha256(content).hexdigest()
         # Content-addressed path: two workers with different content never collide.
         relative_path = f"{job.job_id}/{TRANSCRIPT_ARTIFACT_TYPE}_{content_hash}.json"
-        stored_hash, byte_size = await self._store.write_file(relative_path, content)
+        try:
+            stored_hash, byte_size = await self._store.write_file(relative_path, content)
+        except OSError as exc:
+            code = "DISK_SPACE_LOW" if exc.errno == errno.ENOSPC else "INTERNAL_ERROR"
+            return StageOutcome.fatal(code, error_detail=str(exc))
 
         return StageOutcome.success(
             target=JobStatus.CLEANING_TRANSCRIPT,

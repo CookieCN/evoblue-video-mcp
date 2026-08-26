@@ -116,7 +116,22 @@ async def run_worker_once(
                 )
                 break
 
-            outcome = await handler.execute(job)
+            try:
+                outcome = await handler.execute(job)
+            except Exception as exc:
+                # Any unexpected handler exception fails the job instead of
+                # leaving it running forever. CancelledError is not an Exception.
+                await mark_failure(
+                    sess,
+                    job_id=job.job_id,
+                    owner=owner,
+                    now=now,
+                    error_code="INTERNAL_ERROR",
+                    retryable=False,
+                    error_detail=str(exc),
+                )
+                break
+
             if outcome.error_code is not None:
                 next_retry_at = outcome.next_retry_at
                 if next_retry_at is None and outcome.retryable:

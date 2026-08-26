@@ -75,6 +75,10 @@ async def test_metadata_and_subtitle_artifacts_are_registered(
         session_factory, owner="w1", lease_seconds=30.0, now=1000.0, handlers=handlers
     )
     assert job is not None
+    # The two implemented stages succeed, but cleaning_transcript has no handler yet,
+    # so the job ends failed/INTERNAL_ERROR rather than faking completion.
+    assert job.status == JobStatus.FAILED.value
+    assert job.error_code == "INTERNAL_ERROR"
 
     async with session_factory() as sess:
         artifacts = (
