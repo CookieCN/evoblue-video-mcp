@@ -553,14 +553,24 @@ async def save_artifact_inline(
     session: AsyncSession,
     *,
     job_id: str,
+    owner: str,
+    now: float,
     stage: str,
     artifact_type: str,
     input_fingerprint: str,
     schema_version: int,
     payload_json: str,
-    now: float,
 ) -> None:
-    """Idempotently persist a small inline artifact without advancing job state."""
+    """Persist a checkpoint only while the caller still holds a live lease."""
+    job = await _get(session, job_id)
+    if (
+        job is None
+        or job.lease_owner != owner
+        or job.lease_expires_at is None
+        or job.lease_expires_at <= now
+    ):
+        raise LeaseLostError(f"lease lost for job {job_id!r}")
+
     existing = await get_artifact(
         session, job_id=job_id, artifact_type=artifact_type, input_fingerprint=input_fingerprint
     )
@@ -580,3 +590,43 @@ async def save_artifact_inline(
         )
     )
     await session.commit()
+
+
+async def mark_cancelled(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    owner: str,
+    now: float,
+) -> Job:
+    """Atomically transition a running job into ``cancelled``."""
+    job = await _get(session, job_id)
+    if job is None:
+        raise KeyError(f"No job with id {job_id!r}")
+
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == job.status,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(
+            status=JobStatus.CANCELLED.value,
+            error_code="CANCELLED_BY_USER",
+            lease_owner=None,
+            lease_expires_at=None,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise LeaseLostError(
+            f"Lease lost for job {job_id!r}; owner {owner!r} no longer holds a live lease"
+        )
+
+    await session.commit()
+    return await _get_required(session, job_id)

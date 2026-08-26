@@ -147,25 +147,36 @@ async def test_save_artifact_inline_is_idempotent(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as sess:
+        await enqueue_job(
+            sess,
+            job_id="job-1",
+            url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            request_fingerprint="fp-1",
+            config_fingerprint="cfg",
+            now=1000.0,
+        )
+        await claim_job(sess, job_id="job-1", owner="w1", lease_seconds=30.0, now=1000.0)
         await save_artifact_inline(
             sess,
             job_id="job-1",
+            owner="w1",
+            now=1000.0,
             stage="summarizing_chunks",
             artifact_type="chunk_summary",
             input_fingerprint="fp",
             schema_version=1,
             payload_json="summary",
-            now=1000.0,
         )
         await save_artifact_inline(
             sess,
             job_id="job-1",
+            owner="w1",
+            now=1000.0,
             stage="summarizing_chunks",
             artifact_type="chunk_summary",
             input_fingerprint="fp",
             schema_version=1,
             payload_json="summary",
-            now=1000.0,
         )
 
     async with session_factory() as sess:

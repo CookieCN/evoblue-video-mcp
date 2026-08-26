@@ -27,6 +27,11 @@ def compute_request_fingerprint(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def compute_config_fingerprint(*, provider: str, model: str) -> str:
+    """Derive a fingerprint from LLM configuration that affects report output."""
+    return hashlib.sha256(f"{provider}|{model}".encode()).hexdigest()
+
+
 def new_job_id() -> str:
     return uuid.uuid4().hex
 

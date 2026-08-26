@@ -270,12 +270,13 @@ class SummarizingChunksHandler:
                     await save_artifact_inline(
                         session,
                         job_id=job.job_id,
+                        owner=ctx.owner,
+                        now=ctx.now(),
                         stage="summarizing_chunks",
                         artifact_type=CHUNK_SUMMARY_ARTIFACT_TYPE,
                         input_fingerprint=chunk_fp,
                         schema_version=1,
                         payload_json=summary,
-                        now=ctx.now(),
                     )
                     summaries.append(summary)
                 if not await ctx.renew_lease():

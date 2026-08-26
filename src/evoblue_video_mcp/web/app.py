@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
-from evoblue_video_mcp.application.submit import submit_video
+from evoblue_video_mcp.application.submit import compute_config_fingerprint, submit_video
 from evoblue_video_mcp.config import Settings
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.platforms.detector import PlatformError
@@ -177,13 +177,17 @@ def _register_data_endpoints(
     async def submit_job(payload: SubmitJobInput) -> SubmitJobResponse:
         try:
             async with session_factory() as sess:
+                app_settings = await get_app_settings(sess)
+                provider = (app_settings.llm_provider if app_settings else None) or ""
+                model = (app_settings.llm_model if app_settings else None) or ""
+                config_fp = compute_config_fingerprint(provider=provider, model=model)
                 job, reused = await submit_video(
                     sess,
                     url=payload.url,
                     mode=payload.mode,
                     asr=payload.asr,
                     language=payload.language,
-                    config_fingerprint="default",
+                    config_fingerprint=config_fp,
                     now=time.time(),
                     reuse_window_seconds=3600.0,
                 )

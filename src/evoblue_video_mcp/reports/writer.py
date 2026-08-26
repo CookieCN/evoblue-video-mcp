@@ -74,11 +74,18 @@ class ReportWriter:
 
         conflict = False
         if final.exists():
+            existing_hash = hashlib.sha256(final.read_bytes()).hexdigest()
+            if existing_hash == content_hash:
+                # Idempotent: the file already holds exactly the intended bytes.
+                return ReportWriteResult(
+                    path=final.relative_to(self._root).as_posix(),
+                    content_hash=content_hash,
+                    conflict=False,
+                )
             if previous_hash is None:
                 raise ReportConflictError(
                     f"report already exists and has no known generated hash: {filename}"
                 )
-            existing_hash = hashlib.sha256(final.read_bytes()).hexdigest()
             if existing_hash != previous_hash:
                 conflict = True
                 final = final.with_name(

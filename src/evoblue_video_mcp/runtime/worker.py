@@ -17,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from evoblue_video_mcp.jobs import TERMINAL_JOB_STATUSES, JobStatus
 from evoblue_video_mcp.storage.models import Job
 from evoblue_video_mcp.storage.repository import (
+    LeaseLostError,
     advance_job,
     claim_next_job,
     commit_artifact_and_advance,
     get_job,
     is_cancel_requested,
+    mark_cancelled,
     mark_failure,
     renew_lease,
 )
@@ -165,6 +167,10 @@ async def run_worker_once(
                 )
                 break
 
+            if outcome.error_code == "CANCELLED_BY_USER":
+                await mark_cancelled(sess, job_id=job.job_id, owner=owner, now=now())
+                break
+
             if outcome.error_code is not None:
                 next_retry_at = outcome.next_retry_at
                 if next_retry_at is None and outcome.retryable:
@@ -240,12 +246,16 @@ async def run_worker_loop(
     while True:
         if should_stop is not None and should_stop():
             break
-        job = await run_worker_once(
-            session_factory,
-            owner=owner,
-            lease_seconds=lease_seconds,
-            now_fn=now_fn,
-            handlers=handlers,
-        )
+        try:
+            job = await run_worker_once(
+                session_factory,
+                owner=owner,
+                lease_seconds=lease_seconds,
+                now_fn=now_fn,
+                handlers=handlers,
+            )
+        except LeaseLostError:
+            # A lease lost mid-flight is a normal take-over, not a crash.
+            continue
         if job is None:
             await asyncio.sleep(idle_sleep)
