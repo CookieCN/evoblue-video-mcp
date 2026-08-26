@@ -16,6 +16,7 @@ from evoblue_video_mcp.platforms.detector import PlatformError, detect_video
 from evoblue_video_mcp.platforms.models import Transcript, TranscriptSegment, VideoMetadata
 from evoblue_video_mcp.reports.renderer import render_markdown
 from evoblue_video_mcp.reports.schema import ReportDocument
+from evoblue_video_mcp.reports.synthesis import SynthesisError, synthesize
 from evoblue_video_mcp.reports.writer import ReportConflictError, ReportWriter, report_filename
 from evoblue_video_mcp.runtime.worker import ArtifactRecord, StageContext, StageOutcome
 from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError, ArtifactStore
@@ -296,11 +297,12 @@ class SummarizingChunksHandler:
 
 
 class GeneratingReportHandler:
-    """Render and atomically write the Markdown report."""
+    """Synthesize, render, and atomically write the Markdown report."""
 
-    def __init__(self, store: ArtifactStore, writer: ReportWriter) -> None:
+    def __init__(self, store: ArtifactStore, writer: ReportWriter, llm: LLMProvider) -> None:
         self._store = store
         self._writer = writer
+        self._llm = llm
 
     async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
@@ -317,6 +319,13 @@ class GeneratingReportHandler:
 
         metadata = json.loads(metadata_raw)
         summaries = json.loads(summaries_raw)
+        try:
+            synthesis = await synthesize(self._llm, summaries)
+        except LLMError as exc:
+            return _llm_outcome(exc)
+        except SynthesisError as exc:
+            return StageOutcome.fatal("INTERNAL_ERROR", error_detail=str(exc))
+
         doc = ReportDocument(
             analysis_id=job.job_id,
             source_url=cast(HttpUrl, job.url),
@@ -326,7 +335,10 @@ class GeneratingReportHandler:
             author=metadata.get("author", ""),
             analyzed_at=_now(),
             summary_mode=cast(Literal["auto", "standard", "unboxing"], job.mode),
-            core_summary="\n\n".join(summaries),
+            core_summary=str(synthesis.get("core_summary", "")),
+            key_takeaways=[str(t) for t in synthesis.get("key_takeaways", [])],
+            timeline_outline=str(synthesis.get("timeline_outline", "")),
+            content_analysis=str(synthesis.get("content_analysis", "")),
         )
         markdown = render_markdown(doc)
         content = markdown.encode("utf-8")

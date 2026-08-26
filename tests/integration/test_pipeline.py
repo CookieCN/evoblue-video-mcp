@@ -1,11 +1,12 @@
 """Worker pipeline: submit, fetch metadata/subtitles, register artifacts."""
 
+import json
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp.application.submit import submit_video
 from evoblue_video_mcp.jobs import JobStatus
-from evoblue_video_mcp.llm.fake import FakeLLMProvider
 from evoblue_video_mcp.platforms.base import AdapterError
 from evoblue_video_mcp.platforms.models import (
     Transcript,
@@ -58,6 +59,20 @@ class _FailingAdapter:
 
     async def fetch_transcript(self, ref: VideoRef) -> Transcript:
         raise AdapterError("SUBTITLE_UNAVAILABLE", "no subs", retryable=False)
+
+
+class _PipelineLLM:
+    async def complete(self, prompt: str) -> str:
+        if "JSON" in prompt:
+            return json.dumps(
+                {
+                    "core_summary": "synthesized summary",
+                    "key_takeaways": ["takeaway 1"],
+                    "timeline_outline": "outline",
+                    "content_analysis": "analysis",
+                }
+            )
+        return "chunk summary"
 
 
 async def test_metadata_and_subtitle_artifacts_are_registered(
@@ -135,7 +150,7 @@ async def test_full_pipeline_generates_markdown_report(
     adapter = _FakeAdapter()
     store = ArtifactStore(tmp_path / "artifacts")
     writer = ReportWriter(tmp_path / "reports")
-    llm = FakeLLMProvider("chunk summary")
+    llm = _PipelineLLM()
 
     handlers = {
         JobStatus.FETCHING_METADATA: FetchingMetadataHandler(adapter),
@@ -143,7 +158,7 @@ async def test_full_pipeline_generates_markdown_report(
         JobStatus.CLEANING_TRANSCRIPT: CleaningTranscriptHandler(store),
         JobStatus.CHUNKING: ChunkingHandler(store),
         JobStatus.SUMMARIZING_CHUNKS: SummarizingChunksHandler(store, llm),
-        JobStatus.GENERATING_REPORT: GeneratingReportHandler(store, writer),
+        JobStatus.GENERATING_REPORT: GeneratingReportHandler(store, writer, llm),
         JobStatus.INDEXING: IndexingHandler(writer),
     }
 
