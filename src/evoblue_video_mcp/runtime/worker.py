@@ -6,6 +6,7 @@ so long-running stages can renew their lease and check for cancellation between
 units of work. The loop uses a real clock by default, injectable for tests.
 """
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -223,3 +224,28 @@ async def run_worker_once(
                 )
 
         return await get_job(sess, job_id=job.job_id)
+
+
+async def run_worker_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    owner: str,
+    lease_seconds: float,
+    handlers: Mapping[JobStatus, StageHandler],
+    now_fn: Callable[[], float] | None = None,
+    idle_sleep: float = 1.0,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """Run the worker until ``should_stop`` returns True; sleep briefly when idle."""
+    while True:
+        if should_stop is not None and should_stop():
+            break
+        job = await run_worker_once(
+            session_factory,
+            owner=owner,
+            lease_seconds=lease_seconds,
+            now_fn=now_fn,
+            handlers=handlers,
+        )
+        if job is None:
+            await asyncio.sleep(idle_sleep)
