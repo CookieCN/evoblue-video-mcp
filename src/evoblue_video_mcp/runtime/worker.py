@@ -25,6 +25,15 @@ MISSING_HANDLER_ERROR = "INTERNAL_ERROR"
 DEFAULT_RETRY_DELAY = 60.0
 
 
+def _sanitize_error(exc: Exception) -> str:
+    """Return a safe description of an unexpected exception, never its message.
+
+    Unexpected exception messages may carry URLs, headers, or credential
+    fragments, so only the exception type name is persisted.
+    """
+    return type(exc).__name__
+
+
 @dataclass(frozen=True)
 class ArtifactRecord:
     """A stage artifact to register atomically with the state transition."""
@@ -128,7 +137,7 @@ async def run_worker_once(
                     now=now,
                     error_code="INTERNAL_ERROR",
                     retryable=False,
-                    error_detail=str(exc),
+                    error_detail=_sanitize_error(exc),
                 )
                 break
 

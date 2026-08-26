@@ -140,3 +140,28 @@ async def test_completed_job_is_not_reclaimed(
         job = await get_job(sess, job_id="job-1")
         assert job is not None
         assert job.status == JobStatus.COMPLETED.value
+
+
+class _LeakyHandler:
+    async def execute(self, job: Job) -> StageOutcome:
+        raise RuntimeError("Authorization: Bearer super-secret-token")
+
+
+async def test_unexpected_exception_is_sanitized(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as sess:
+        await _enqueue(sess)
+
+    job = await run_worker_once(
+        session_factory,
+        owner="worker-a",
+        lease_seconds=30.0,
+        now=1000.0,
+        handlers={JobStatus.FETCHING_METADATA: _LeakyHandler()},
+    )
+    assert job is not None
+    assert job.status == JobStatus.FAILED.value
+    assert job.error_code == "INTERNAL_ERROR"
+    assert job.error_detail == "RuntimeError"
+    assert "secret" not in job.error_detail

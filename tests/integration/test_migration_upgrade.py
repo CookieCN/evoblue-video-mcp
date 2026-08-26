@@ -85,3 +85,36 @@ async def test_frozen_v2_database_upgrades_to_v3(tmp_path) -> None:
         assert artifacts == "job_artifacts"
 
     await engine.dispose()
+
+
+async def _schema_snapshot(engine) -> dict:
+    async with engine.connect() as conn:
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                    " AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            )
+        ).scalars().all()
+        snapshot: dict = {}
+        for table in tables:
+            columns = (await conn.execute(text(f"PRAGMA table_info({table})"))).all()
+            indexes = (await conn.execute(text(f"PRAGMA index_list({table})"))).all()
+            snapshot[table] = (columns, indexes)
+        return snapshot
+
+
+async def test_fresh_install_matches_upgraded_v2(tmp_path) -> None:
+    fresh_engine = build_engine(tmp_path / "fresh.db")
+    await init_db(fresh_engine)
+
+    v2_db = tmp_path / "v2.db"
+    sqlite3.connect(v2_db).executescript(_HISTORICAL_V2)
+    v2_engine = build_engine(v2_db)
+    await init_db(v2_engine)
+
+    assert await _schema_snapshot(fresh_engine) == await _schema_snapshot(v2_engine)
+
+    await fresh_engine.dispose()
+    await v2_engine.dispose()

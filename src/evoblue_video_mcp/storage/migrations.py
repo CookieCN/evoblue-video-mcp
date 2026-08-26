@@ -2,19 +2,16 @@
 
 Each migration is an ordered (version, apply) pair. ``init_db`` records the
 highest applied version in ``schema_migrations`` and only runs migrations newer
-than that, so startup is idempotent. Migration DDL is frozen per version: v1
-creates ``jobs`` with a unique ``idempotency_key``, and v3 rebuilds it with a
-non-unique ``request_fingerprint`` so reuse-window re-analysis is possible.
+than that, so startup is idempotent. Every migration uses frozen SQL defined in
+this file — never the current ORM models — so a fresh install and an upgrade from
+any historical version converge on the same schema.
 """
 
 import time
 from collections.abc import Awaitable, Callable
-from typing import cast
 
-from sqlalchemy import Table, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-
-from evoblue_video_mcp.storage.models import AppSettings, JobArtifact
 
 SCHEMA_VERSION = 3
 
@@ -47,6 +44,40 @@ CREATE TABLE jobs (
     UNIQUE (idempotency_key)
 )
 """
+
+_APP_SETTINGS_V2_DDL = """
+CREATE TABLE app_settings (
+    id INTEGER NOT NULL PRIMARY KEY,
+    setup_completed BOOLEAN NOT NULL,
+    report_directory VARCHAR,
+    llm_provider VARCHAR(32),
+    llm_model VARCHAR(128),
+    updated_at FLOAT NOT NULL
+)
+"""
+
+_JOB_ARTIFACTS_V3_DDL = """
+CREATE TABLE job_artifacts (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    job_id VARCHAR(64) NOT NULL,
+    stage VARCHAR(32) NOT NULL,
+    artifact_type VARCHAR(64) NOT NULL,
+    input_fingerprint VARCHAR(64) NOT NULL,
+    schema_version INTEGER NOT NULL,
+    storage_kind VARCHAR(16) NOT NULL,
+    payload_json TEXT,
+    relative_path VARCHAR,
+    content_hash VARCHAR(64),
+    byte_size INTEGER,
+    created_at FLOAT NOT NULL,
+    updated_at FLOAT NOT NULL,
+    UNIQUE (job_id, artifact_type, input_fingerprint)
+)
+"""
+
+_JOB_ARTIFACTS_V3_INDEX = (
+    "CREATE INDEX ix_job_artifacts_job_id ON job_artifacts (job_id)"
+)
 
 _JOBS_V3_REBUILD = [
     """
@@ -89,7 +120,6 @@ _JOBS_V3_REBUILD = [
         error_code, error_detail, retryable, created_at, updated_at
     FROM jobs
     """,
-    # Drop the old table (and its index names) before creating new indexes.
     "DROP TABLE jobs",
     "ALTER TABLE jobs_new RENAME TO jobs",
     "CREATE UNIQUE INDEX ix_jobs_job_id ON jobs (job_id)",
@@ -103,11 +133,12 @@ async def _apply_v1(conn: AsyncConnection) -> None:
 
 
 async def _apply_v2(conn: AsyncConnection) -> None:
-    await conn.run_sync(cast(Table, AppSettings.__table__).create, checkfirst=True)
+    await conn.execute(text(_APP_SETTINGS_V2_DDL))
 
 
 async def _apply_v3(conn: AsyncConnection) -> None:
-    await conn.run_sync(cast(Table, JobArtifact.__table__).create, checkfirst=True)
+    await conn.execute(text(_JOB_ARTIFACTS_V3_DDL))
+    await conn.execute(text(_JOB_ARTIFACTS_V3_INDEX))
     for statement in _JOBS_V3_REBUILD:
         await conn.execute(text(statement))
 
