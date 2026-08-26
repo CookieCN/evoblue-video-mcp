@@ -16,7 +16,7 @@ from evoblue_video_mcp.platforms.detector import PlatformError, detect_video
 from evoblue_video_mcp.platforms.models import Transcript, TranscriptSegment, VideoMetadata
 from evoblue_video_mcp.reports.renderer import render_markdown
 from evoblue_video_mcp.reports.schema import ReportDocument
-from evoblue_video_mcp.reports.writer import ReportWriter, safe_filename
+from evoblue_video_mcp.reports.writer import ReportConflictError, ReportWriter, report_filename
 from evoblue_video_mcp.runtime.worker import ArtifactRecord, StageOutcome
 from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError, ArtifactStore
 from evoblue_video_mcp.storage.models import Job
@@ -299,9 +299,22 @@ class GeneratingReportHandler:
             core_summary="\n\n".join(summaries),
         )
         markdown = render_markdown(doc)
-        filename = safe_filename(doc.title, job.job_id)
-        result = await self._writer.write_report(filename, markdown)
         content = markdown.encode("utf-8")
+        content_hash = hashlib.sha256(content).hexdigest()
+        filename = report_filename(doc.title, job.job_id, content_hash)
+
+        previous = await get_artifact(
+            session,
+            job_id=job.job_id,
+            artifact_type=REPORT_ARTIFACT_TYPE,
+            input_fingerprint=fingerprint,
+        )
+        previous_hash = previous.content_hash if previous else None
+
+        try:
+            result = await self._writer.write_report(filename, markdown, previous_hash)
+        except ReportConflictError as exc:
+            return StageOutcome.fatal("REPORT_CONFLICT", error_detail=str(exc))
 
         return StageOutcome.success(
             target=JobStatus.INDEXING,

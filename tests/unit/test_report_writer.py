@@ -2,7 +2,14 @@
 
 import hashlib
 
-from evoblue_video_mcp.reports.writer import ReportWriter, safe_filename
+import pytest
+
+from evoblue_video_mcp.reports.writer import (
+    ReportConflictError,
+    ReportWriter,
+    report_filename,
+    safe_filename,
+)
 
 
 def test_safe_filename_removes_invalid_chars() -> None:
@@ -36,3 +43,21 @@ async def test_write_report_no_conflict_when_unchanged(tmp_path) -> None:
     first = await writer.write_report("report.md", "v1")
     second = await writer.write_report("report.md", "v1", previous_hash=first.content_hash)
     assert second.conflict is False
+
+
+async def test_write_report_refuses_overwrite_without_hash(tmp_path) -> None:
+    writer = ReportWriter(tmp_path)
+    await writer.write_report("report.md", "v1")
+    with pytest.raises(ReportConflictError):
+        await writer.write_report("report.md", "v2")
+
+
+def test_report_filename_is_content_addressed() -> None:
+    a = report_filename("Title", "a1", "0" * 64)
+    b = report_filename("Title", "a1", "1" * 64)
+    assert a != b
+
+
+def test_safe_filename_escapes_windows_reserved_names() -> None:
+    assert safe_filename("CON", "a1") != "CON.md"
+    assert safe_filename("nul", "a1") != "nul.md"

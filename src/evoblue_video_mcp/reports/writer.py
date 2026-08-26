@@ -11,6 +11,21 @@ from pathlib import Path
 from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{i}" for i in range(1, 10)),
+        *(f"lpt{i}" for i in range(1, 10)),
+    }
+)
+_MAX_COMPONENT = 200
+
+
+class ReportConflictError(RuntimeError):
+    """Raised when writing would clobber a file with no known generated hash."""
 
 
 @dataclass(frozen=True)
@@ -21,14 +36,25 @@ class ReportWriteResult:
 
 
 def safe_filename(title: str, analysis_id: str) -> str:
-    """Derive a Windows-safe filename from the title, falling back to analysis id."""
+    """Derive a Windows-safe filename, escaping reserved names and length limits."""
     cleaned = _INVALID_FILENAME_CHARS.sub("", title).strip().rstrip(". ")
-    base = cleaned or f"analysis-{analysis_id}"
-    return f"{base}.md"
+    if not cleaned:
+        cleaned = f"analysis-{analysis_id}"
+    if cleaned.lower() in _WINDOWS_RESERVED:
+        cleaned = f"{cleaned}-{analysis_id}"
+    if len(cleaned) > _MAX_COMPONENT:
+        cleaned = cleaned[:_MAX_COMPONENT].rstrip(". ")
+    return f"{cleaned}.md"
+
+
+def report_filename(title: str, analysis_id: str, content_hash: str) -> str:
+    """Content-addressed filename so different content never collides."""
+    base = safe_filename(title, analysis_id)
+    return f"{base[:-3]}-{content_hash[:8]}.md"
 
 
 class ReportWriter:
-    """Write Markdown reports atomically, refusing to clobber user edits."""
+    """Write Markdown reports atomically, refusing to clobber unknown files."""
 
     def __init__(self, report_dir: str | Path) -> None:
         self._root = Path(report_dir).resolve()
@@ -36,7 +62,7 @@ class ReportWriter:
     async def write_report(
         self, filename: str, content: str, previous_hash: str | None = None
     ) -> ReportWriteResult:
-        """Write ``content``; if the file changed since ``previous_hash``, write a copy."""
+        """Write ``content``; refuse to overwrite a file whose hash we do not know."""
         return await asyncio.to_thread(self._write_sync, filename, content, previous_hash)
 
     def _write_sync(
@@ -47,7 +73,11 @@ class ReportWriter:
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         conflict = False
-        if previous_hash is not None and final.exists():
+        if final.exists():
+            if previous_hash is None:
+                raise ReportConflictError(
+                    f"report already exists and has no known generated hash: {filename}"
+                )
             existing_hash = hashlib.sha256(final.read_bytes()).hexdigest()
             if existing_hash != previous_hash:
                 conflict = True
