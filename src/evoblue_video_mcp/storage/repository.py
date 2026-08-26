@@ -547,3 +547,36 @@ async def is_cancel_requested(session: AsyncSession, *, job_id: str) -> bool:
     """Return True if the job has a pending cancellation request."""
     job = await _get(session, job_id)
     return job is not None and job.cancel_requested_at is not None
+
+
+async def save_artifact_inline(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    stage: str,
+    artifact_type: str,
+    input_fingerprint: str,
+    schema_version: int,
+    payload_json: str,
+    now: float,
+) -> None:
+    """Idempotently persist a small inline artifact without advancing job state."""
+    existing = await get_artifact(
+        session, job_id=job_id, artifact_type=artifact_type, input_fingerprint=input_fingerprint
+    )
+    if existing is not None:
+        return
+    session.add(
+        JobArtifact(
+            job_id=job_id,
+            stage=stage,
+            artifact_type=artifact_type,
+            input_fingerprint=input_fingerprint,
+            schema_version=schema_version,
+            storage_kind="inline_json",
+            payload_json=payload_json,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await session.commit()

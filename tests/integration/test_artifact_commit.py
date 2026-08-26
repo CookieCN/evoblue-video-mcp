@@ -12,6 +12,7 @@ from evoblue_video_mcp.storage.repository import (
     commit_artifact_and_advance,
     enqueue_job,
     recover_stale_jobs,
+    save_artifact_inline,
 )
 
 
@@ -140,3 +141,35 @@ async def test_commit_artifact_lease_lost_rolls_back(
             await sess.scalars(select(JobArtifact).where(JobArtifact.job_id == "job-1"))
         ).all()
         assert artifacts == []
+
+
+async def test_save_artifact_inline_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as sess:
+        await save_artifact_inline(
+            sess,
+            job_id="job-1",
+            stage="summarizing_chunks",
+            artifact_type="chunk_summary",
+            input_fingerprint="fp",
+            schema_version=1,
+            payload_json="summary",
+            now=1000.0,
+        )
+        await save_artifact_inline(
+            sess,
+            job_id="job-1",
+            stage="summarizing_chunks",
+            artifact_type="chunk_summary",
+            input_fingerprint="fp",
+            schema_version=1,
+            payload_json="summary",
+            now=1000.0,
+        )
+
+    async with session_factory() as sess:
+        artifacts = (
+            await sess.scalars(select(JobArtifact).where(JobArtifact.job_id == "job-1"))
+        ).all()
+        assert len(artifacts) == 1

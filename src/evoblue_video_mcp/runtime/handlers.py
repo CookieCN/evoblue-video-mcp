@@ -20,7 +20,7 @@ from evoblue_video_mcp.reports.writer import ReportConflictError, ReportWriter, 
 from evoblue_video_mcp.runtime.worker import ArtifactRecord, StageContext, StageOutcome
 from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError, ArtifactStore
 from evoblue_video_mcp.storage.models import Job
-from evoblue_video_mcp.storage.repository import get_artifact
+from evoblue_video_mcp.storage.repository import get_artifact, save_artifact_inline
 from evoblue_video_mcp.transcript.chunker import chunk_transcript
 from evoblue_video_mcp.transcript.cleaner import clean_transcript
 
@@ -29,6 +29,7 @@ TRANSCRIPT_ARTIFACT_TYPE = "platform_transcript"
 CLEANED_ARTIFACT_TYPE = "cleaned_transcript"
 CHUNKS_ARTIFACT_TYPE = "chunks"
 SUMMARIES_ARTIFACT_TYPE = "chunk_summaries"
+CHUNK_SUMMARY_ARTIFACT_TYPE = "chunk_summary"
 REPORT_ARTIFACT_TYPE = "report"
 
 
@@ -230,11 +231,14 @@ class ChunkingHandler:
 
 
 class SummarizingChunksHandler:
-    """Summarize each chunk with the LLM provider."""
+    """Summarize each chunk with the LLM provider, checkpointing per chunk."""
 
-    def __init__(self, store: ArtifactStore, llm: LLMProvider) -> None:
+    def __init__(
+        self, store: ArtifactStore, llm: LLMProvider, config_fingerprint: str = ""
+    ) -> None:
         self._store = store
         self._llm = llm
+        self._config_fingerprint = config_fingerprint
 
     async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
@@ -250,7 +254,29 @@ class SummarizingChunksHandler:
             for chunk in chunks:
                 if await ctx.is_cancelled():
                     return StageOutcome.fatal("CANCELLED_BY_USER", error_detail="cancelled")
-                summaries.append(await self._llm.complete(_summary_prompt(chunk)))
+                chunk_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
+                chunk_fp = _stage_fingerprint(f"{chunk_hash}|{self._config_fingerprint}")
+                existing = await get_artifact(
+                    session,
+                    job_id=job.job_id,
+                    artifact_type=CHUNK_SUMMARY_ARTIFACT_TYPE,
+                    input_fingerprint=chunk_fp,
+                )
+                if existing is not None and existing.payload_json is not None:
+                    summaries.append(existing.payload_json)
+                else:
+                    summary = await self._llm.complete(_summary_prompt(chunk))
+                    await save_artifact_inline(
+                        session,
+                        job_id=job.job_id,
+                        stage="summarizing_chunks",
+                        artifact_type=CHUNK_SUMMARY_ARTIFACT_TYPE,
+                        input_fingerprint=chunk_fp,
+                        schema_version=1,
+                        payload_json=summary,
+                        now=ctx.now(),
+                    )
+                    summaries.append(summary)
                 if not await ctx.renew_lease():
                     return StageOutcome.fatal("ENGINE_RESTARTED", error_detail="lease lost")
         except LLMError as exc:
