@@ -1,5 +1,7 @@
 """Pydantic models for the Local Engine HTTP API."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -49,3 +51,16 @@ class AppSettingsUpdate(StrictModel):
     report_directory: str | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
+
+
+class SubmitJobInput(StrictModel):
+    url: str
+    mode: Literal["auto", "standard", "unboxing"] = "auto"
+    asr: Literal["auto", "disabled", "required"] = "auto"
+    language: str | None = None
+
+
+class SubmitJobResponse(StrictModel):
+    job_id: str
+    status: str
+    reused: bool

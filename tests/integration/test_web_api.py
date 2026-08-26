@@ -146,3 +146,28 @@ def test_production_requires_local_token() -> None:
     settings = Settings(environment="production", local_access_token="")
     with pytest.raises(RuntimeError):
         create_app(settings=settings)
+
+
+async def test_submit_job_endpoint(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(session_factory) as client:
+        resp = await client.post("/api/jobs", json={"url": "https://youtu.be/dQw4w9WgXcQ"})
+        assert resp.status_code == 200
+        first = resp.json()
+        assert first["job_id"]
+        assert first["reused"] is False
+
+        second = await client.post(
+            "/api/jobs", json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}
+        )
+        assert second.json()["reused"] is True
+        assert second.json()["job_id"] == first["job_id"]
+
+
+async def test_submit_job_rejects_invalid_url(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(session_factory) as client:
+        resp = await client.post("/api/jobs", json={"url": "not-a-url"})
+        assert resp.status_code == 422

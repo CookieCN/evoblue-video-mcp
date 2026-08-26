@@ -8,8 +8,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
+from evoblue_video_mcp.application.submit import submit_video
 from evoblue_video_mcp.config import Settings
 from evoblue_video_mcp.jobs import JobStatus
+from evoblue_video_mcp.platforms.detector import PlatformError
 from evoblue_video_mcp.storage.models import Job
 from evoblue_video_mcp.storage.repository import (
     get_app_settings,
@@ -23,6 +25,8 @@ from evoblue_video_mcp.web.schemas import (
     JobDetailResponse,
     JobListItem,
     JobListResponse,
+    SubmitJobInput,
+    SubmitJobResponse,
 )
 
 
@@ -168,3 +172,21 @@ def _register_data_endpoints(
             llm_provider=saved.llm_provider,
             llm_model=saved.llm_model,
         )
+
+    @app.post("/api/jobs", response_model=SubmitJobResponse, dependencies=dependencies)
+    async def submit_job(payload: SubmitJobInput) -> SubmitJobResponse:
+        try:
+            async with session_factory() as sess:
+                job, reused = await submit_video(
+                    sess,
+                    url=payload.url,
+                    mode=payload.mode,
+                    asr=payload.asr,
+                    language=payload.language,
+                    config_fingerprint="default",
+                    now=time.time(),
+                    reuse_window_seconds=3600.0,
+                )
+        except PlatformError as exc:
+            raise HTTPException(status_code=422, detail=exc.error_code) from exc
+        return SubmitJobResponse(job_id=job.job_id, status=job.status, reused=reused)

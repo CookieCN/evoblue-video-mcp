@@ -15,6 +15,7 @@ from evoblue_video_mcp.platforms.models import (
     VideoRef,
 )
 from evoblue_video_mcp.reports.writer import ReportWriter
+from evoblue_video_mcp.runtime.assembly import build_handlers
 from evoblue_video_mcp.runtime.handlers import (
     ChunkingHandler,
     CleaningTranscriptHandler,
@@ -181,3 +182,21 @@ async def test_full_pipeline_generates_markdown_report(
     reports = list((tmp_path / "reports").glob("*.md"))
     assert len(reports) == 1
     assert reports[0].read_text(encoding="utf-8").startswith("---\n")
+
+
+def test_build_handlers_assembles_full_set(tmp_path) -> None:
+    handlers = build_handlers(
+        adapter=_FakeAdapter(),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+        report_writer=ReportWriter(tmp_path / "reports"),
+        llm=_PipelineLLM(),
+    )
+    assert set(handlers) == {
+        JobStatus.FETCHING_METADATA,
+        JobStatus.FETCHING_SUBTITLES,
+        JobStatus.CLEANING_TRANSCRIPT,
+        JobStatus.CHUNKING,
+        JobStatus.SUMMARIZING_CHUNKS,
+        JobStatus.GENERATING_REPORT,
+        JobStatus.INDEXING,
+    }
