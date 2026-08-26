@@ -12,17 +12,17 @@ class _ForwardHandler:
     def __init__(self, target: JobStatus) -> None:
         self._target = target
 
-    async def execute(self, job: Job) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
         return StageOutcome.success(self._target)
 
 
 class _TransientHandler:
-    async def execute(self, job: Job) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
         return StageOutcome.transient("SUBTITLE_UNAVAILABLE", next_retry_at=1500.0)
 
 
 class _FatalHandler:
-    async def execute(self, job: Job) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
         return StageOutcome.fatal("LLM_NOT_CONFIGURED")
 
 
@@ -143,7 +143,7 @@ async def test_completed_job_is_not_reclaimed(
 
 
 class _LeakyHandler:
-    async def execute(self, job: Job) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
         raise RuntimeError("Authorization: Bearer super-secret-token")
 
 

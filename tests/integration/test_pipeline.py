@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp.application.submit import submit_video
 from evoblue_video_mcp.jobs import JobStatus
+from evoblue_video_mcp.llm.fake import FakeLLMProvider
 from evoblue_video_mcp.platforms.base import AdapterError
 from evoblue_video_mcp.platforms.models import (
     Transcript,
@@ -12,9 +13,15 @@ from evoblue_video_mcp.platforms.models import (
     VideoMetadata,
     VideoRef,
 )
+from evoblue_video_mcp.reports.writer import ReportWriter
 from evoblue_video_mcp.runtime.handlers import (
+    ChunkingHandler,
+    CleaningTranscriptHandler,
     FetchingMetadataHandler,
     FetchingSubtitlesHandler,
+    GeneratingReportHandler,
+    IndexingHandler,
+    SummarizingChunksHandler,
 )
 from evoblue_video_mcp.runtime.worker import run_worker_once
 from evoblue_video_mcp.storage.artifact_store import ArtifactStore
@@ -115,3 +122,43 @@ async def test_failure_maps_error_detail(
     assert job.status == JobStatus.FAILED.value
     assert job.error_code == "METADATA_FETCH_FAILED"
     assert job.error_detail == "boom"
+
+
+async def test_full_pipeline_generates_markdown_report(
+    tmp_path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _FakeAdapter()
+    store = ArtifactStore(tmp_path / "artifacts")
+    writer = ReportWriter(tmp_path / "reports")
+    llm = FakeLLMProvider("chunk summary")
+
+    handlers = {
+        JobStatus.FETCHING_METADATA: FetchingMetadataHandler(adapter),
+        JobStatus.FETCHING_SUBTITLES: FetchingSubtitlesHandler(adapter, store),
+        JobStatus.CLEANING_TRANSCRIPT: CleaningTranscriptHandler(store),
+        JobStatus.CHUNKING: ChunkingHandler(store),
+        JobStatus.SUMMARIZING_CHUNKS: SummarizingChunksHandler(store, llm),
+        JobStatus.GENERATING_REPORT: GeneratingReportHandler(store, writer),
+        JobStatus.INDEXING: IndexingHandler(writer),
+    }
+
+    async with session_factory() as sess:
+        _, reused = await submit_video(
+            sess,
+            url="https://youtu.be/dQw4w9WgXcQ",
+            config_fingerprint="cfg",
+            now=1000.0,
+            reuse_window_seconds=3600.0,
+        )
+        assert reused is False
+
+    job = await run_worker_once(
+        session_factory, owner="w1", lease_seconds=30.0, now=1000.0, handlers=handlers
+    )
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED.value
+
+    reports = list((tmp_path / "reports").glob("*.md"))
+    assert len(reports) == 1
+    assert reports[0].read_text(encoding="utf-8").startswith("---\n")

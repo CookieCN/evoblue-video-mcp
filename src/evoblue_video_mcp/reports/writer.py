@@ -8,6 +8,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError
+
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -60,7 +62,22 @@ class ReportWriter:
             os.fsync(handle.fileno())
         os.replace(tmp, final)
 
-        return ReportWriteResult(path=str(final), content_hash=content_hash, conflict=conflict)
+        return ReportWriteResult(
+            path=final.relative_to(self._root).as_posix(),
+            content_hash=content_hash,
+            conflict=conflict,
+        )
+
+    async def read_file_verified(self, filename: str, expected_hash: str) -> str:
+        """Read a report file and verify its content hash."""
+        final = self._resolve(filename)
+        content = final.read_bytes()
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected_hash:
+            raise ArtifactIntegrityError(
+                f"report hash mismatch: expected {expected_hash}, got {actual}"
+            )
+        return content.decode("utf-8")
 
     def _resolve(self, filename: str) -> Path:
         candidate = (self._root / filename).resolve()

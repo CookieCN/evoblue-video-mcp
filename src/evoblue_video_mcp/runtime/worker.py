@@ -90,7 +90,7 @@ class StageOutcome:
 
 
 class StageHandler(Protocol):
-    async def execute(self, job: Job) -> StageOutcome: ...
+    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome: ...
 
 
 async def run_worker_once(
@@ -126,7 +126,7 @@ async def run_worker_once(
                 break
 
             try:
-                outcome = await handler.execute(job)
+                outcome = await handler.execute(job, sess)
             except Exception as exc:
                 # Any unexpected handler exception fails the job instead of
                 # leaving it running forever. CancelledError is not an Exception.
