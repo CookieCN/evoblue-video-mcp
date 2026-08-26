@@ -235,6 +235,9 @@ async def advance_job(
         "status": to_status.value,
         "stage": new_stage,
         "progress": job.progress if progress is None else progress,
+        "error_code": None,
+        "error_detail": None,
+        "retryable": False,
         "updated_at": now,
     }
     if to_status in TERMINAL_JOB_STATUSES:
@@ -471,6 +474,9 @@ async def commit_artifact_and_advance(
         "status": to_status.value,
         "stage": new_stage,
         "progress": job.progress if progress is None else progress,
+        "error_code": None,
+        "error_detail": None,
+        "retryable": False,
         "updated_at": now,
     }
     if to_status in TERMINAL_JOB_STATUSES:

@@ -45,7 +45,7 @@ class HttpLLMProvider:
             if self._http_client is not None:
                 resp = await self._http_client.post(url, json=payload, headers=headers)
             else:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=120.0) as client:
                     resp = await client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             raise LLMError(LLM_RATE_LIMITED, "LLM request timed out", retryable=True) from exc
