@@ -7,6 +7,10 @@ import uuid
 from pathlib import Path
 
 
+class ArtifactIntegrityError(RuntimeError):
+    """Raised when a file artifact's content hash does not match its registry."""
+
+
 class ArtifactStore:
     """Write artifact files atomically under a root directory.
 
@@ -39,3 +43,20 @@ class ArtifactStore:
         if not candidate.is_relative_to(self._root):
             raise ValueError(f"artifact path escapes root: {relative_path!r}")
         return candidate
+
+    async def read_file(self, relative_path: str) -> bytes:
+        """Read an artifact file, validating the path stays under the root."""
+        return await asyncio.to_thread(self._read_file_sync, relative_path)
+
+    def _read_file_sync(self, relative_path: str) -> bytes:
+        return self._resolve(relative_path).read_bytes()
+
+    async def read_file_verified(self, relative_path: str, expected_hash: str) -> bytes:
+        """Read an artifact file and verify its content hash."""
+        content = await self.read_file(relative_path)
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected_hash:
+            raise ArtifactIntegrityError(
+                f"artifact hash mismatch: expected {expected_hash}, got {actual}"
+            )
+        return content

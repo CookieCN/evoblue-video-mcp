@@ -495,3 +495,22 @@ async def commit_artifact_and_advance(
 
     await session.commit()
     return await _get_required(session, job_id)
+
+
+async def get_artifact(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    artifact_type: str,
+    input_fingerprint: str,
+) -> JobArtifact | None:
+    """Return a registered artifact, or ``None`` if not present."""
+    return (
+        await session.scalars(
+            select(JobArtifact).where(
+                JobArtifact.job_id == job_id,
+                JobArtifact.artifact_type == artifact_type,
+                JobArtifact.input_fingerprint == input_fingerprint,
+            )
+        )
+    ).first()
