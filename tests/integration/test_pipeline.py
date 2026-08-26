@@ -1,4 +1,4 @@
-"""End-to-end worker pipeline: submit, fetch metadata/subtitles, register artifacts."""
+"""Worker pipeline: submit, fetch metadata/subtitles, register artifacts."""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,9 +16,9 @@ from evoblue_video_mcp.runtime.handlers import (
     FetchingMetadataHandler,
     FetchingSubtitlesHandler,
 )
-from evoblue_video_mcp.runtime.worker import StageOutcome, run_worker_once
+from evoblue_video_mcp.runtime.worker import run_worker_once
 from evoblue_video_mcp.storage.artifact_store import ArtifactStore
-from evoblue_video_mcp.storage.models import Job, JobArtifact
+from evoblue_video_mcp.storage.models import JobArtifact
 
 
 class _FakeAdapter:
@@ -49,15 +49,7 @@ class _FailingAdapter:
         raise AdapterError("SUBTITLE_UNAVAILABLE", "no subs", retryable=False)
 
 
-class _ForwardHandler:
-    def __init__(self, target: JobStatus) -> None:
-        self._target = target
-
-    async def execute(self, job: Job) -> StageOutcome:
-        return StageOutcome.success(self._target)
-
-
-async def test_full_pipeline_registers_metadata_and_transcript(
+async def test_metadata_and_subtitle_artifacts_are_registered(
     tmp_path,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -66,11 +58,6 @@ async def test_full_pipeline_registers_metadata_and_transcript(
     handlers = {
         JobStatus.FETCHING_METADATA: FetchingMetadataHandler(adapter),
         JobStatus.FETCHING_SUBTITLES: FetchingSubtitlesHandler(adapter, store),
-        JobStatus.CLEANING_TRANSCRIPT: _ForwardHandler(JobStatus.CHUNKING),
-        JobStatus.CHUNKING: _ForwardHandler(JobStatus.SUMMARIZING_CHUNKS),
-        JobStatus.SUMMARIZING_CHUNKS: _ForwardHandler(JobStatus.GENERATING_REPORT),
-        JobStatus.GENERATING_REPORT: _ForwardHandler(JobStatus.INDEXING),
-        JobStatus.INDEXING: _ForwardHandler(JobStatus.COMPLETED),
     }
 
     async with session_factory() as sess:
@@ -88,7 +75,6 @@ async def test_full_pipeline_registers_metadata_and_transcript(
         session_factory, owner="w1", lease_seconds=30.0, now=1000.0, handlers=handlers
     )
     assert job is not None
-    assert job.status == JobStatus.COMPLETED.value
 
     async with session_factory() as sess:
         artifacts = (

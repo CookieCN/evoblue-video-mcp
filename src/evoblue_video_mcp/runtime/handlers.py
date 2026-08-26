@@ -97,9 +97,11 @@ class FetchingSubtitlesHandler:
         except AdapterError as exc:
             return _adapter_outcome(exc)
 
-        relative_path = f"{job.job_id}/{TRANSCRIPT_ARTIFACT_TYPE}.json"
         content = transcript_to_json(transcript).encode("utf-8")
-        content_hash, byte_size = await self._store.write_file(relative_path, content)
+        content_hash = hashlib.sha256(content).hexdigest()
+        # Content-addressed path: two workers with different content never collide.
+        relative_path = f"{job.job_id}/{TRANSCRIPT_ARTIFACT_TYPE}_{content_hash}.json"
+        stored_hash, byte_size = await self._store.write_file(relative_path, content)
 
         return StageOutcome.success(
             target=JobStatus.CLEANING_TRANSCRIPT,
@@ -110,7 +112,7 @@ class FetchingSubtitlesHandler:
                 schema_version=1,
                 storage_kind="file",
                 relative_path=relative_path,
-                content_hash=content_hash,
+                content_hash=stored_hash,
                 byte_size=byte_size,
             ),
         )

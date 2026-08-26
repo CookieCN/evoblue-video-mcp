@@ -2,8 +2,9 @@
 
 Each migration is an ordered (version, apply) pair. ``init_db`` records the
 highest applied version in ``schema_migrations`` and only runs migrations newer
-than that, so startup is idempotent and future schema changes slot in behind a
-new version instead of mutating an existing one in place.
+than that, so startup is idempotent. Migration DDL is frozen per version: v1
+creates ``jobs`` with a unique ``idempotency_key``, and v3 rebuilds it with a
+non-unique ``request_fingerprint`` so reuse-window re-analysis is possible.
 """
 
 import time
@@ -13,15 +14,91 @@ from typing import cast
 from sqlalchemy import Table, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from evoblue_video_mcp.storage.models import AppSettings, Job, JobArtifact
+from evoblue_video_mcp.storage.models import AppSettings, JobArtifact
 
 SCHEMA_VERSION = 3
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
+_JOBS_V1_DDL = """
+CREATE TABLE jobs (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    job_id VARCHAR(64) NOT NULL,
+    idempotency_key VARCHAR(64) NOT NULL,
+    url TEXT NOT NULL,
+    mode VARCHAR(32) NOT NULL,
+    asr VARCHAR(32) NOT NULL,
+    language VARCHAR(64),
+    config_fingerprint VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    stage VARCHAR(32),
+    progress INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    max_attempts INTEGER NOT NULL,
+    lease_owner VARCHAR(64),
+    lease_expires_at FLOAT,
+    cancel_requested_at FLOAT,
+    next_retry_at FLOAT,
+    error_code VARCHAR(64),
+    error_detail TEXT,
+    retryable BOOLEAN NOT NULL,
+    created_at FLOAT NOT NULL,
+    updated_at FLOAT NOT NULL,
+    UNIQUE (idempotency_key)
+)
+"""
+
+_JOBS_V3_REBUILD = [
+    """
+    CREATE TABLE jobs_new (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        job_id VARCHAR(64) NOT NULL,
+        request_fingerprint VARCHAR(64) NOT NULL,
+        url TEXT NOT NULL,
+        mode VARCHAR(32) NOT NULL,
+        asr VARCHAR(32) NOT NULL,
+        language VARCHAR(64),
+        config_fingerprint VARCHAR(64) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        stage VARCHAR(32),
+        progress INTEGER NOT NULL,
+        attempt INTEGER NOT NULL,
+        max_attempts INTEGER NOT NULL,
+        lease_owner VARCHAR(64),
+        lease_expires_at FLOAT,
+        cancel_requested_at FLOAT,
+        next_retry_at FLOAT,
+        error_code VARCHAR(64),
+        error_detail TEXT,
+        retryable BOOLEAN NOT NULL,
+        created_at FLOAT NOT NULL,
+        updated_at FLOAT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX ix_jobs_job_id ON jobs_new (job_id)",
+    "CREATE INDEX ix_jobs_request_fingerprint ON jobs_new (request_fingerprint)",
+    "CREATE INDEX ix_jobs_status ON jobs_new (status)",
+    """
+    INSERT INTO jobs_new (
+        id, job_id, request_fingerprint, url, mode, asr, language,
+        config_fingerprint, status, stage, progress, attempt, max_attempts,
+        lease_owner, lease_expires_at, cancel_requested_at, next_retry_at,
+        error_code, error_detail, retryable, created_at, updated_at
+    )
+    SELECT
+        id, job_id, idempotency_key, url, mode, asr, language,
+        config_fingerprint, status, stage, progress, attempt, max_attempts,
+        lease_owner, lease_expires_at, cancel_requested_at, next_retry_at,
+        error_code, error_detail, retryable, created_at, updated_at
+    FROM jobs
+    """,
+    "DROP TABLE jobs",
+    "ALTER TABLE jobs_new RENAME TO jobs",
+]
+
 
 async def _apply_v1(conn: AsyncConnection) -> None:
-    await conn.run_sync(cast(Table, Job.__table__).create, checkfirst=True)
+    await conn.execute(text(_JOBS_V1_DDL))
 
 
 async def _apply_v2(conn: AsyncConnection) -> None:
@@ -30,6 +107,8 @@ async def _apply_v2(conn: AsyncConnection) -> None:
 
 async def _apply_v3(conn: AsyncConnection) -> None:
     await conn.run_sync(cast(Table, JobArtifact.__table__).create, checkfirst=True)
+    for statement in _JOBS_V3_REBUILD:
+        await conn.execute(text(statement))
 
 
 _MIGRATIONS: list[tuple[int, Migration]] = [

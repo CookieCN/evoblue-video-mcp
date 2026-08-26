@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import os
+import uuid
 from pathlib import Path
 
 
@@ -24,7 +25,7 @@ class ArtifactStore:
     def _write_file_sync(self, relative_path: str, content: bytes) -> tuple[str, int]:
         final = self._resolve(relative_path)
         final.parent.mkdir(parents=True, exist_ok=True)
-        tmp = final.with_name(final.name + ".tmp")
+        tmp = final.with_name(f"{final.name}.{uuid.uuid4().hex}.tmp")
         with open(tmp, "wb") as handle:
             handle.write(content)
             handle.flush()
