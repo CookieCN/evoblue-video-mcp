@@ -10,6 +10,20 @@ from evoblue_video_mcp.storage.repository import enqueue_job
 from evoblue_video_mcp.web import create_app
 
 
+class _MemoryCredentials:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get_secret(self, reference: str) -> str | None:
+        return self.values.get(reference)
+
+    def set_secret(self, reference: str, secret: str) -> None:
+        self.values[reference] = secret
+
+    def delete_secret(self, reference: str) -> None:
+        self.values.pop(reference, None)
+
+
 async def _enqueue(
     session: AsyncSession, *, job_id: str, status: JobStatus = JobStatus.QUEUED
 ) -> None:
@@ -75,6 +89,19 @@ async def test_jobs_rejects_out_of_range_pagination(
         assert (await client.get("/api/jobs", params={"offset": -1})).status_code == 422
 
 
+async def test_cancel_queued_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as sess:
+        await _enqueue(sess, job_id="cancel-me")
+
+    async with _client(session_factory) as client:
+        resp = await client.post("/api/jobs/cancel-me/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == JobStatus.CANCELLED.value
+    assert resp.json()["error_code"] == "CANCELLED_BY_USER"
+
+
 async def test_settings_roundtrip(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -117,6 +144,46 @@ async def test_settings_explicit_null_clears_field(
         resp = await client.get("/api/settings")
         assert resp.json()["report_directory"] is None
         assert resp.json()["setup_completed"] is True
+
+
+async def test_settings_store_api_key_only_in_credential_store(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    credentials = _MemoryCredentials()
+    app = create_app(session_factory=session_factory, credential_store=credentials)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.put(
+            "/api/settings",
+            json={
+                "setup_completed": True,
+                "llm_provider": "openai",
+                "llm_base_url": "https://api.openai.com/v1/",
+                "llm_model": "gpt-test",
+                "llm_api_key": "super-secret-key",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["llm_base_url"] == "https://api.openai.com/v1"
+        assert resp.json()["llm_api_key_configured"] is True
+        assert "super-secret-key" not in resp.text
+
+        fetched = await client.get("/api/settings")
+        assert fetched.json()["llm_api_key_configured"] is True
+        assert "super-secret-key" not in fetched.text
+
+    assert credentials.values == {"llm:openai": "super-secret-key"}
+
+
+async def test_settings_reject_insecure_remote_llm_url(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(session_factory) as client:
+        resp = await client.put(
+            "/api/settings", json={"llm_base_url": "http://api.example.com/v1"}
+        )
+    assert resp.status_code == 422
 
 
 async def test_local_token_protects_data_endpoints(

@@ -44,3 +44,11 @@ async def test_job_artifacts_table_exists(engine: AsyncEngine) -> None:
             )
         ).scalar()
         assert row == "job_artifacts"
+
+
+async def test_app_settings_has_runtime_llm_columns(engine: AsyncEngine) -> None:
+    async with engine.connect() as conn:
+        columns = {
+            row[1] for row in (await conn.execute(text("PRAGMA table_info(app_settings)"))).all()
+        }
+    assert {"llm_base_url", "llm_credential_ref"} <= columns

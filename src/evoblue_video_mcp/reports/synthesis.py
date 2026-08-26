@@ -2,13 +2,25 @@
 
 import json
 import re
-from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from evoblue_video_mcp.llm.base import LLMProvider
 
 
 class SynthesisError(RuntimeError):
     """Raised when the LLM's synthesis output cannot be parsed."""
+
+
+class SynthesisResult(BaseModel):
+    """Validated report fields returned by the synthesis call."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    core_summary: str = Field(min_length=1)
+    key_takeaways: list[str] = Field(min_length=1)
+    timeline_outline: str = Field(min_length=1)
+    content_analysis: str = Field(min_length=1)
 
 
 _SYNTHESIS_PROMPT = (
@@ -25,23 +37,24 @@ _SYNTHESIS_PROMPT = (
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 
-def parse_synthesis(raw: str) -> dict[str, Any]:
+def parse_synthesis(raw: str) -> SynthesisResult:
     """Parse the LLM's JSON output, tolerating a surrounding markdown fence."""
     stripped = _FENCE_RE.sub(r"\1", raw.strip()).strip()
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError as exc:
         raise SynthesisError(f"invalid synthesis output: {exc}") from exc
-    if not isinstance(data, dict):
-        raise SynthesisError("synthesis output is not a JSON object")
-    return data
+    try:
+        return SynthesisResult.model_validate(data)
+    except ValidationError as exc:
+        raise SynthesisError("synthesis output does not match the report schema") from exc
 
 
 def _synthesis_prompt(summaries: list[str]) -> str:
     return _SYNTHESIS_PROMPT.format(summaries="\n".join(f"- {s}" for s in summaries))
 
 
-async def synthesize(llm: LLMProvider, summaries: list[str]) -> dict[str, Any]:
+async def synthesize(llm: LLMProvider, summaries: list[str]) -> SynthesisResult:
     """Ask the LLM to synthesize summaries into structured report sections."""
     raw = await llm.complete(_synthesis_prompt(summaries))
     return parse_synthesis(raw)

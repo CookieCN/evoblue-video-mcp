@@ -19,13 +19,16 @@ def test_parse_synthesis_plain_json() -> None:
             }
         )
     )
-    assert data["core_summary"] == "summary"
-    assert data["key_takeaways"] == ["a", "b"]
+    assert data.core_summary == "summary"
+    assert data.key_takeaways == ["a", "b"]
 
 
 def test_parse_synthesis_strips_code_fence() -> None:
-    data = parse_synthesis('```json\n{"core_summary": "s"}\n```')
-    assert data["core_summary"] == "s"
+    data = parse_synthesis(
+        '```json\n{"core_summary":"s","key_takeaways":["a"],'
+        '"timeline_outline":"o","content_analysis":"a"}\n```'
+    )
+    assert data.core_summary == "s"
 
 
 def test_parse_synthesis_rejects_invalid_json() -> None:
@@ -36,13 +39,31 @@ def test_parse_synthesis_rejects_invalid_json() -> None:
 async def test_synthesize() -> None:
     llm = FakeLLMProvider(
         json.dumps(
-            {
-                "core_summary": "s",
-                "key_takeaways": ["a"],
-                "timeline_outline": "",
-                "content_analysis": "",
-            }
+                {
+                    "core_summary": "s",
+                    "key_takeaways": ["a"],
+                    "timeline_outline": "outline",
+                    "content_analysis": "analysis",
+                }
         )
     )
     data = await synthesize(llm, ["chunk 1"])
-    assert data["core_summary"] == "s"
+    assert data.core_summary == "s"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"core_summary": "s"},
+        {
+            "core_summary": "s",
+            "key_takeaways": "not-a-list",
+            "timeline_outline": "o",
+            "content_analysis": "a",
+        },
+    ],
+)
+def test_parse_synthesis_rejects_schema_mismatch(payload: dict) -> None:
+    with pytest.raises(SynthesisError, match="report schema"):
+        parse_synthesis(json.dumps(payload))

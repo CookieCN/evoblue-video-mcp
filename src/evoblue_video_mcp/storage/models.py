@@ -48,7 +48,9 @@ class AppSettings(Base):
     setup_completed: Mapped[bool] = mapped_column(Boolean, default=False)
     report_directory: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    llm_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    llm_credential_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[float] = mapped_column(Float)
 
 

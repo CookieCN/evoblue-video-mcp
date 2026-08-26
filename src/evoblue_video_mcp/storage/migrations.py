@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
@@ -143,10 +143,16 @@ async def _apply_v3(conn: AsyncConnection) -> None:
         await conn.execute(text(statement))
 
 
+async def _apply_v4(conn: AsyncConnection) -> None:
+    await conn.execute(text("ALTER TABLE app_settings ADD COLUMN llm_base_url VARCHAR"))
+    await conn.execute(text("ALTER TABLE app_settings ADD COLUMN llm_credential_ref VARCHAR(128)"))
+
+
 _MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _apply_v1),
     (2, _apply_v2),
     (3, _apply_v3),
+    (4, _apply_v4),
 ]
 
 

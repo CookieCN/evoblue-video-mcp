@@ -8,6 +8,8 @@ from evoblue_video_mcp.llm.base import (
     LLM_AUTH_FAILED,
     LLM_NOT_CONFIGURED,
     LLM_RATE_LIMITED,
+    LLM_REQUEST_FAILED,
+    LLM_RESPONSE_INVALID,
     LLMError,
 )
 
@@ -32,8 +34,8 @@ class HttpLLMProvider:
         self._http_client = http_client
 
     async def complete(self, prompt: str) -> str:
-        if not self._api_key:
-            raise LLMError(LLM_NOT_CONFIGURED, "no API key configured")
+        if not self._api_key or not self._base_url or not self._model:
+            raise LLMError(LLM_NOT_CONFIGURED, "LLM provider is not fully configured")
 
         url = f"{self._base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
@@ -48,7 +50,7 @@ class HttpLLMProvider:
         except httpx.TimeoutException as exc:
             raise LLMError(LLM_RATE_LIMITED, "LLM request timed out", retryable=True) from exc
         except httpx.RequestError as exc:
-            raise LLMError(LLM_RATE_LIMITED, f"LLM request failed: {exc}", retryable=True) from exc
+            raise LLMError(LLM_RATE_LIMITED, "LLM network request failed", retryable=True) from exc
 
         if resp.status_code in (401, 403):
             raise LLMError(LLM_AUTH_FAILED, f"LLM auth failed: HTTP {resp.status_code}")
@@ -58,15 +60,30 @@ class HttpLLMProvider:
             )
         if resp.status_code >= 400:
             raise LLMError(
-                LLM_AUTH_FAILED, f"LLM request failed: HTTP {resp.status_code}", retryable=False
+                LLM_REQUEST_FAILED,
+                f"LLM request rejected: HTTP {resp.status_code}",
+                retryable=False,
             )
 
-        return _extract_content(resp.json())
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise LLMError(
+                LLM_RESPONSE_INVALID, "LLM returned invalid JSON", retryable=False
+            ) from exc
+        return _extract_content(data)
 
 
-def _extract_content(data: dict[str, Any]) -> str:
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    return str(message.get("content") or "")
+def _extract_content(data: Any) -> str:
+    if not isinstance(data, dict):
+        raise LLMError(LLM_RESPONSE_INVALID, "LLM response is not an object")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise LLMError(LLM_RESPONSE_INVALID, "LLM response has no choices")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise LLMError(LLM_RESPONSE_INVALID, "LLM response has no message")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise LLMError(LLM_RESPONSE_INVALID, "LLM response content is empty")
+    return content

@@ -1,11 +1,14 @@
 """Worker loop drives the state machine: advance, fail, complete, and idle."""
 
+import asyncio
+import time
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.runtime.worker import StageOutcome, run_worker_once
 from evoblue_video_mcp.storage.models import Job
-from evoblue_video_mcp.storage.repository import enqueue_job, get_job
+from evoblue_video_mcp.storage.repository import enqueue_job, get_job, request_cancellation
 
 
 def _now() -> float:
@@ -28,6 +31,23 @@ class _TransientHandler:
 class _FatalHandler:
     async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
         return StageOutcome.fatal("LLM_NOT_CONFIGURED")
+
+
+class _SlowCompleteHandler:
+    async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
+        await asyncio.sleep(0.6)
+        return StageOutcome.success(JobStatus.COMPLETED)
+
+
+class _CancellationAwareHandler:
+    def __init__(self, started: asyncio.Event) -> None:
+        self._started = started
+
+    async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
+        self._started.set()
+        while not await ctx.is_cancelled():
+            await asyncio.sleep(0.01)
+        return StageOutcome.fatal("CANCELLED_BY_USER")
 
 
 _PIPELINE_CHAIN = [
@@ -173,3 +193,54 @@ async def test_unexpected_exception_is_sanitized(
     assert job.error_code == "INTERNAL_ERROR"
     assert job.error_detail == "RuntimeError"
     assert "secret" not in job.error_detail
+
+
+async def test_worker_renews_lease_during_long_handler(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started = time.time()
+    async with session_factory() as sess:
+        await enqueue_job(
+            sess,
+            job_id="slow-job",
+            url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            request_fingerprint="slow-fp",
+            config_fingerprint="cfg",
+            now=started,
+            status=JobStatus.INDEXING,
+        )
+
+    job = await run_worker_once(
+        session_factory,
+        owner="worker-a",
+        lease_seconds=0.2,
+        handlers={JobStatus.INDEXING: _SlowCompleteHandler()},
+    )
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED.value
+
+
+async def test_running_worker_observes_external_cancellation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as sess:
+        await _enqueue(sess, job_id="cancel-running")
+
+    started = asyncio.Event()
+    worker = asyncio.create_task(
+        run_worker_once(
+            session_factory,
+            owner="worker-a",
+            lease_seconds=1.0,
+            handlers={JobStatus.FETCHING_METADATA: _CancellationAwareHandler(started)},
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    async with session_factory() as sess:
+        requested = await request_cancellation(sess, job_id="cancel-running", now=time.time())
+        assert requested is not None
+        assert requested.cancel_requested_at is not None
+
+    job = await asyncio.wait_for(worker, timeout=1.0)
+    assert job is not None
+    assert job.status == JobStatus.CANCELLED.value

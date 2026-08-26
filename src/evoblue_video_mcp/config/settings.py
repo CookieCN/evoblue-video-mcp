@@ -1,6 +1,7 @@
 """Safe Local Engine defaults; secrets are intentionally absent."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -20,6 +21,10 @@ class Settings(BaseSettings):
     # (development only). Production generates one at engine startup.
     local_access_token: str = ""
     telemetry_enabled: bool = False
+    data_directory: Path | None = None
+    worker_owner: str = "local-worker"
+    worker_lease_seconds: float = Field(default=60.0, gt=0)
+    worker_idle_sleep: float = Field(default=1.0, gt=0)
 
 
 @lru_cache
@@ -27,4 +32,3 @@ def get_settings() -> Settings:
     """Return one immutable-by-convention settings object per process."""
 
     return Settings()
-

@@ -123,113 +123,190 @@ async def run_worker_once(
             return None
         job_id = job.job_id
 
+        async def renew_current_lease() -> bool:
+            async with session_factory() as heartbeat_session:
+                return await renew_lease(
+                    heartbeat_session,
+                    job_id=job_id,
+                    owner=owner,
+                    now=now(),
+                    lease_seconds=lease_seconds,
+                )
+
+        async def cancellation_requested() -> bool:
+            async with session_factory() as cancellation_session:
+                return await is_cancel_requested(cancellation_session, job_id=job_id)
+
         ctx = StageContext(
             owner=owner,
             lease_seconds=lease_seconds,
             now=now,
-            renew_lease=lambda: renew_lease(
-                sess, job_id=job_id, owner=owner, now=now(), lease_seconds=lease_seconds
-            ),
-            is_cancelled=lambda: is_cancel_requested(sess, job_id=job_id),
+            renew_lease=renew_current_lease,
+            is_cancelled=cancellation_requested,
         )
 
-        while True:
-            status = JobStatus(job.status)
-            if status in TERMINAL_JOB_STATUSES:
-                break
+        heartbeat_stop = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            _heartbeat_lease(
+                session_factory,
+                job_id=job_id,
+                owner=owner,
+                lease_seconds=lease_seconds,
+                now=now,
+                stop=heartbeat_stop,
+            )
+        )
 
-            handler = handlers.get(status)
-            if handler is None:
-                await mark_failure(
-                    sess,
-                    job_id=job.job_id,
-                    owner=owner,
-                    now=now(),
-                    error_code=MISSING_HANDLER_ERROR,
-                    retryable=False,
-                    error_detail=f"no handler for stage {status.value}",
-                )
-                break
+        try:
+            while True:
+                status = JobStatus(job.status)
+                if status in TERMINAL_JOB_STATUSES:
+                    break
 
-            try:
-                outcome = await handler.execute(job, sess, ctx)
-            except Exception as exc:
-                # Any unexpected handler exception fails the job instead of
-                # leaving it running forever. CancelledError is not an Exception.
-                await mark_failure(
-                    sess,
-                    job_id=job.job_id,
-                    owner=owner,
-                    now=now(),
-                    error_code="INTERNAL_ERROR",
-                    retryable=False,
-                    error_detail=_sanitize_error(exc),
-                )
-                break
+                handler = handlers.get(status)
+                if handler is None:
+                    heartbeat_stop.set()
+                    await heartbeat
+                    await mark_failure(
+                        sess,
+                        job_id=job.job_id,
+                        owner=owner,
+                        now=now(),
+                        error_code=MISSING_HANDLER_ERROR,
+                        retryable=False,
+                        error_detail=f"no handler for stage {status.value}",
+                    )
+                    break
 
-            if outcome.error_code == "CANCELLED_BY_USER":
-                await mark_cancelled(sess, job_id=job.job_id, owner=owner, now=now())
-                break
+                # Claim/get operations leave a read transaction open. Close it before
+                # an external call so the separate heartbeat session can write.
+                await sess.commit()
+                try:
+                    outcome = await handler.execute(job, sess, ctx)
+                except Exception as exc:
+                    heartbeat_stop.set()
+                    await heartbeat
+                    # CancelledError is not an Exception, so shutdown still propagates.
+                    await mark_failure(
+                        sess,
+                        job_id=job.job_id,
+                        owner=owner,
+                        now=now(),
+                        error_code="INTERNAL_ERROR",
+                        retryable=False,
+                        error_detail=_sanitize_error(exc),
+                    )
+                    break
+                heartbeat_stop.set()
+                await heartbeat
+                await sess.refresh(job)
 
-            if outcome.error_code is not None:
-                next_retry_at = outcome.next_retry_at
-                if next_retry_at is None and outcome.retryable:
-                    next_retry_at = now() + DEFAULT_RETRY_DELAY
-                await mark_failure(
-                    sess,
-                    job_id=job.job_id,
-                    owner=owner,
-                    now=now(),
-                    error_code=outcome.error_code,
-                    retryable=outcome.retryable,
-                    next_retry_at=next_retry_at,
-                    error_detail=outcome.error_detail,
-                )
-                break
+                if outcome.error_code == "CANCELLED_BY_USER":
+                    await mark_cancelled(sess, job_id=job.job_id, owner=owner, now=now())
+                    break
 
-            if outcome.target is None:
-                await mark_failure(
-                    sess,
-                    job_id=job.job_id,
-                    owner=owner,
-                    now=now(),
-                    error_code=MISSING_HANDLER_ERROR,
-                    retryable=False,
-                    error_detail="handler returned no target",
-                )
-                break
+                if outcome.error_code is not None:
+                    next_retry_at = outcome.next_retry_at
+                    if next_retry_at is None and outcome.retryable:
+                        next_retry_at = now() + DEFAULT_RETRY_DELAY
+                    await mark_failure(
+                        sess,
+                        job_id=job.job_id,
+                        owner=owner,
+                        now=now(),
+                        error_code=outcome.error_code,
+                        retryable=outcome.retryable,
+                        next_retry_at=next_retry_at,
+                        error_detail=outcome.error_detail,
+                    )
+                    break
 
-            if outcome.artifact is not None:
-                job = await commit_artifact_and_advance(
-                    sess,
-                    job_id=job.job_id,
-                    owner=owner,
-                    to_status=outcome.target,
-                    now=now(),
-                    lease_seconds=lease_seconds,
-                    progress=outcome.progress,
-                    stage=outcome.artifact.stage,
-                    artifact_type=outcome.artifact.artifact_type,
-                    input_fingerprint=outcome.artifact.input_fingerprint,
-                    schema_version=outcome.artifact.schema_version,
-                    storage_kind=outcome.artifact.storage_kind,
-                    payload_json=outcome.artifact.payload_json,
-                    relative_path=outcome.artifact.relative_path,
-                    content_hash=outcome.artifact.content_hash,
-                    byte_size=outcome.artifact.byte_size,
+                if outcome.target is None:
+                    await mark_failure(
+                        sess,
+                        job_id=job.job_id,
+                        owner=owner,
+                        now=now(),
+                        error_code=MISSING_HANDLER_ERROR,
+                        retryable=False,
+                        error_detail="handler returned no target",
+                    )
+                    break
+
+                if outcome.artifact is not None:
+                    job = await commit_artifact_and_advance(
+                        sess,
+                        job_id=job.job_id,
+                        owner=owner,
+                        to_status=outcome.target,
+                        now=now(),
+                        lease_seconds=lease_seconds,
+                        progress=outcome.progress,
+                        stage=outcome.artifact.stage,
+                        artifact_type=outcome.artifact.artifact_type,
+                        input_fingerprint=outcome.artifact.input_fingerprint,
+                        schema_version=outcome.artifact.schema_version,
+                        storage_kind=outcome.artifact.storage_kind,
+                        payload_json=outcome.artifact.payload_json,
+                        relative_path=outcome.artifact.relative_path,
+                        content_hash=outcome.artifact.content_hash,
+                        byte_size=outcome.artifact.byte_size,
+                    )
+                else:
+                    job = await advance_job(
+                        sess,
+                        job_id=job.job_id,
+                        owner=owner,
+                        to_status=outcome.target,
+                        now=now(),
+                        lease_seconds=lease_seconds,
+                        progress=outcome.progress,
+                    )
+                heartbeat_stop = asyncio.Event()
+                heartbeat = asyncio.create_task(
+                    _heartbeat_lease(
+                        session_factory,
+                        job_id=job_id,
+                        owner=owner,
+                        lease_seconds=lease_seconds,
+                        now=now,
+                        stop=heartbeat_stop,
+                    )
                 )
-            else:
-                job = await advance_job(
-                    sess,
-                    job_id=job.job_id,
-                    owner=owner,
-                    to_status=outcome.target,
-                    now=now(),
-                    lease_seconds=lease_seconds,
-                    progress=outcome.progress,
-                )
+        finally:
+            heartbeat_stop.set()
+            await heartbeat
 
         return await get_job(sess, job_id=job.job_id)
+
+
+async def _heartbeat_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: str,
+    owner: str,
+    lease_seconds: float,
+    now: Callable[[], float],
+    stop: asyncio.Event,
+) -> None:
+    """Renew a job lease in a separate session while a handler is running."""
+    interval = lease_seconds / 3
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return
+        except TimeoutError:
+            pass
+        async with session_factory() as heartbeat_session:
+            renewed = await renew_lease(
+                heartbeat_session,
+                job_id=job_id,
+                owner=owner,
+                now=now(),
+                lease_seconds=lease_seconds,
+            )
+        if not renewed:
+            return
 
 
 async def run_worker_loop(

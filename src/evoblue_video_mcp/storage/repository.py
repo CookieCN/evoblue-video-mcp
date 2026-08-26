@@ -383,7 +383,9 @@ async def save_app_settings(
     now: float,
     report_directory: str | None = None,
     llm_provider: str | None = None,
+    llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_credential_ref: str | None = None,
 ) -> AppSettings:
     """Persist the single app-settings row (upsert); ``None`` fields clear the value."""
     settings = await get_app_settings(session)
@@ -394,7 +396,9 @@ async def save_app_settings(
     settings.setup_completed = setup_completed
     settings.report_directory = report_directory
     settings.llm_provider = llm_provider
+    settings.llm_base_url = llm_base_url
     settings.llm_model = llm_model
+    settings.llm_credential_ref = llm_credential_ref
     settings.updated_at = now
 
     await session.commit()
@@ -562,13 +566,19 @@ async def save_artifact_inline(
     payload_json: str,
 ) -> None:
     """Persist a checkpoint only while the caller still holds a live lease."""
-    job = await _get(session, job_id)
-    if (
-        job is None
-        or job.lease_owner != owner
-        or job.lease_expires_at is None
-        or job.lease_expires_at <= now
-    ):
+    lease_guard = await session.execute(
+        update(Job)
+        .where(
+            Job.job_id == job_id,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(updated_at=Job.updated_at)
+        .returning(Job.id)
+    )
+    if lease_guard.scalar_one_or_none() is None:
+        await session.rollback()
         raise LeaseLostError(f"lease lost for job {job_id!r}")
 
     existing = await get_artifact(
@@ -628,5 +638,38 @@ async def mark_cancelled(
             f"Lease lost for job {job_id!r}; owner {owner!r} no longer holds a live lease"
         )
 
+    await session.commit()
+    return await _get_required(session, job_id)
+
+
+async def request_cancellation(session: AsyncSession, *, job_id: str, now: float) -> Job | None:
+    """Cancel an idle job immediately or flag a running job for a safe-point stop."""
+    job = await _get(session, job_id)
+    if job is None:
+        return None
+    status = JobStatus(job.status)
+    if status in TERMINAL_JOB_STATUSES:
+        return job
+
+    values: dict[str, object] = {"cancel_requested_at": now, "updated_at": now}
+    if status in {JobStatus.QUEUED, JobStatus.RETRY_WAIT}:
+        values.update(
+            status=JobStatus.CANCELLED.value,
+            error_code="CANCELLED_BY_USER",
+            retryable=False,
+            next_retry_at=None,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+
+    result = await session.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == job.status)
+        .values(values)
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        return await _get(session, job_id)
     await session.commit()
     return await _get_required(session, job_id)

@@ -10,3 +10,6 @@ __all__ = [
     "recover_on_startup",
     "run_worker_once",
 ]
+from evoblue_video_mcp.runtime.bootstrap import create_runtime_app
+
+__all__ = ["create_runtime_app"]

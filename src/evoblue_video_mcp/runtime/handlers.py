@@ -234,12 +234,9 @@ class ChunkingHandler:
 class SummarizingChunksHandler:
     """Summarize each chunk with the LLM provider, checkpointing per chunk."""
 
-    def __init__(
-        self, store: ArtifactStore, llm: LLMProvider, config_fingerprint: str = ""
-    ) -> None:
+    def __init__(self, store: ArtifactStore, llm: LLMProvider) -> None:
         self._store = store
         self._llm = llm
-        self._config_fingerprint = config_fingerprint
 
     async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
@@ -250,19 +247,21 @@ class SummarizingChunksHandler:
             return StageOutcome.fatal("INTERNAL_ERROR", error_detail="missing chunks artifact")
 
         chunks = json.loads(raw)
+        await session.commit()
         summaries: list[str] = []
         try:
             for chunk in chunks:
                 if await ctx.is_cancelled():
                     return StageOutcome.fatal("CANCELLED_BY_USER", error_detail="cancelled")
                 chunk_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
-                chunk_fp = _stage_fingerprint(f"{chunk_hash}|{self._config_fingerprint}")
+                chunk_fp = _stage_fingerprint(f"{chunk_hash}|{job.config_fingerprint}")
                 existing = await get_artifact(
                     session,
                     job_id=job.job_id,
                     artifact_type=CHUNK_SUMMARY_ARTIFACT_TYPE,
                     input_fingerprint=chunk_fp,
                 )
+                await session.commit()
                 if existing is not None and existing.payload_json is not None:
                     summaries.append(existing.payload_json)
                 else:
@@ -320,6 +319,7 @@ class GeneratingReportHandler:
 
         metadata = json.loads(metadata_raw)
         summaries = json.loads(summaries_raw)
+        await session.commit()
         try:
             synthesis = await synthesize(self._llm, summaries)
         except LLMError as exc:
@@ -336,10 +336,10 @@ class GeneratingReportHandler:
             author=metadata.get("author", ""),
             analyzed_at=_now(),
             summary_mode=cast(Literal["auto", "standard", "unboxing"], job.mode),
-            core_summary=str(synthesis.get("core_summary", "")),
-            key_takeaways=[str(t) for t in synthesis.get("key_takeaways", [])],
-            timeline_outline=str(synthesis.get("timeline_outline", "")),
-            content_analysis=str(synthesis.get("content_analysis", "")),
+            core_summary=synthesis.core_summary,
+            key_takeaways=synthesis.key_takeaways,
+            timeline_outline=synthesis.timeline_outline,
+            content_analysis=synthesis.content_analysis,
         )
         markdown = render_markdown(doc)
         content = markdown.encode("utf-8")

@@ -7,6 +7,8 @@ from evoblue_video_mcp.llm.base import (
     LLM_AUTH_FAILED,
     LLM_NOT_CONFIGURED,
     LLM_RATE_LIMITED,
+    LLM_REQUEST_FAILED,
+    LLM_RESPONSE_INVALID,
     LLMError,
 )
 from evoblue_video_mcp.llm.http import HttpLLMProvider
@@ -62,3 +64,36 @@ async def test_missing_api_key_is_not_configured() -> None:
     with pytest.raises(LLMError) as exc:
         await provider.complete("prompt")
     assert exc.value.error_code == LLM_NOT_CONFIGURED
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{"message": {"content": ""}}]},
+        ["not-an-object"],
+    ],
+)
+async def test_malformed_success_response_has_stable_error(body) -> None:
+    client = _client(200, body)
+    with pytest.raises(LLMError) as exc:
+        await _provider(client).complete("prompt")
+    assert exc.value.error_code == LLM_RESPONSE_INVALID
+    assert exc.value.retryable is False
+
+
+async def test_non_json_success_response_has_stable_error() -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text="not-json"))
+    )
+    with pytest.raises(LLMError) as exc:
+        await _provider(client).complete("prompt")
+    assert exc.value.error_code == LLM_RESPONSE_INVALID
+
+
+async def test_non_auth_client_error_is_not_misreported_as_auth() -> None:
+    client = _client(400, {})
+    with pytest.raises(LLMError) as exc:
+        await _provider(client).complete("prompt")
+    assert exc.value.error_code == LLM_REQUEST_FAILED
