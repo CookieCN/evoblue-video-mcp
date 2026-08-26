@@ -8,21 +8,25 @@ from evoblue_video_mcp.storage.models import Job
 from evoblue_video_mcp.storage.repository import enqueue_job, get_job
 
 
+def _now() -> float:
+    return 1000.0
+
+
 class _ForwardHandler:
     def __init__(self, target: JobStatus) -> None:
         self._target = target
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
         return StageOutcome.success(self._target)
 
 
 class _TransientHandler:
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
         return StageOutcome.transient("SUBTITLE_UNAVAILABLE", next_retry_at=1500.0)
 
 
 class _FatalHandler:
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
         return StageOutcome.fatal("LLM_NOT_CONFIGURED")
 
 
@@ -58,7 +62,11 @@ async def test_worker_runs_full_pipeline_to_completion(
 
     handlers = {src: _ForwardHandler(dst) for src, dst in _PIPELINE_CHAIN}
     job = await run_worker_once(
-        session_factory, owner="worker-a", lease_seconds=30.0, now=1000.0, handlers=handlers
+        session_factory,
+        owner="worker-a",
+        lease_seconds=30.0,
+        now_fn=_now,
+        handlers=handlers,
     )
     assert job is not None
     assert job.status == JobStatus.COMPLETED.value
@@ -75,7 +83,7 @@ async def test_worker_transient_failure_enters_retry_wait(
         session_factory,
         owner="worker-a",
         lease_seconds=30.0,
-        now=1000.0,
+        now_fn=_now,
         handlers={JobStatus.FETCHING_METADATA: _TransientHandler()},
     )
     assert job is not None
@@ -95,7 +103,7 @@ async def test_worker_fatal_failure_enters_failed(
         session_factory,
         owner="worker-a",
         lease_seconds=30.0,
-        now=1000.0,
+        now_fn=_now,
         handlers={JobStatus.FETCHING_METADATA: _FatalHandler()},
     )
     assert job is not None
@@ -107,7 +115,7 @@ async def test_worker_idle_returns_none(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     job = await run_worker_once(
-        session_factory, owner="worker-a", lease_seconds=30.0, now=1000.0, handlers={}
+        session_factory, owner="worker-a", lease_seconds=30.0, now_fn=_now, handlers={}
     )
     assert job is None
 
@@ -119,7 +127,7 @@ async def test_worker_missing_handler_marks_failed(
         await _enqueue(sess)
 
     job = await run_worker_once(
-        session_factory, owner="worker-a", lease_seconds=30.0, now=1000.0, handlers={}
+        session_factory, owner="worker-a", lease_seconds=30.0, now_fn=_now, handlers={}
     )
     assert job is not None
     assert job.status == JobStatus.FAILED.value
@@ -133,7 +141,7 @@ async def test_completed_job_is_not_reclaimed(
         await _enqueue(sess)
         handlers = {src: _ForwardHandler(dst) for src, dst in _PIPELINE_CHAIN}
         await run_worker_once(
-            session_factory, owner="worker-a", lease_seconds=30.0, now=1000.0, handlers=handlers
+            session_factory, owner="worker-a", lease_seconds=30.0, now_fn=_now, handlers=handlers
         )
 
     async with session_factory() as sess:
@@ -143,7 +151,7 @@ async def test_completed_job_is_not_reclaimed(
 
 
 class _LeakyHandler:
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx) -> StageOutcome:
         raise RuntimeError("Authorization: Bearer super-secret-token")
 
 
@@ -157,7 +165,7 @@ async def test_unexpected_exception_is_sanitized(
         session_factory,
         owner="worker-a",
         lease_seconds=30.0,
-        now=1000.0,
+        now_fn=_now,
         handlers={JobStatus.FETCHING_METADATA: _LeakyHandler()},
     )
     assert job is not None

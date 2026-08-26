@@ -17,7 +17,7 @@ from evoblue_video_mcp.platforms.models import Transcript, TranscriptSegment, Vi
 from evoblue_video_mcp.reports.renderer import render_markdown
 from evoblue_video_mcp.reports.schema import ReportDocument
 from evoblue_video_mcp.reports.writer import ReportConflictError, ReportWriter, report_filename
-from evoblue_video_mcp.runtime.worker import ArtifactRecord, StageOutcome
+from evoblue_video_mcp.runtime.worker import ArtifactRecord, StageContext, StageOutcome
 from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError, ArtifactStore
 from evoblue_video_mcp.storage.models import Job
 from evoblue_video_mcp.storage.repository import get_artifact
@@ -110,7 +110,7 @@ class FetchingMetadataHandler:
     def __init__(self, adapter: PlatformAdapter) -> None:
         self._adapter = adapter
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         try:
             ref = detect_video(job.url)
             metadata = await self._adapter.fetch_metadata(ref)
@@ -139,7 +139,7 @@ class FetchingSubtitlesHandler:
         self._adapter = adapter
         self._store = store
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         try:
             ref = detect_video(job.url)
             transcript = await self._adapter.fetch_transcript(ref)
@@ -178,7 +178,7 @@ class CleaningTranscriptHandler:
     def __init__(self, store: ArtifactStore) -> None:
         self._store = store
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
         raw = await _load_json_artifact(
             session, self._store, job.job_id, TRANSCRIPT_ARTIFACT_TYPE, fingerprint
@@ -207,7 +207,7 @@ class ChunkingHandler:
         self._store = store
         self._max_chars = max_chars
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
         raw = await _load_json_artifact(
             session, self._store, job.job_id, CLEANED_ARTIFACT_TYPE, fingerprint
@@ -236,7 +236,7 @@ class SummarizingChunksHandler:
         self._store = store
         self._llm = llm
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
         raw = await _load_json_artifact(
             session, self._store, job.job_id, CHUNKS_ARTIFACT_TYPE, fingerprint
@@ -248,7 +248,11 @@ class SummarizingChunksHandler:
         summaries: list[str] = []
         try:
             for chunk in chunks:
+                if await ctx.is_cancelled():
+                    return StageOutcome.fatal("CANCELLED_BY_USER", error_detail="cancelled")
                 summaries.append(await self._llm.complete(_summary_prompt(chunk)))
+                if not await ctx.renew_lease():
+                    return StageOutcome.fatal("ENGINE_RESTARTED", error_detail="lease lost")
         except LLMError as exc:
             return _llm_outcome(exc)
 
@@ -272,7 +276,7 @@ class GeneratingReportHandler:
         self._store = store
         self._writer = writer
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
         metadata_raw = await _load_json_artifact(
             session, self._store, job.job_id, METADATA_ARTIFACT_TYPE, fingerprint
@@ -341,7 +345,7 @@ class IndexingHandler:
     def __init__(self, writer: ReportWriter) -> None:
         self._writer = writer
 
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome:
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome:
         fingerprint = _stage_fingerprint(job.url)
         artifact = await get_artifact(
             session,

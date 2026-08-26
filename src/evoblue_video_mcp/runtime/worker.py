@@ -1,11 +1,13 @@
 """Worker execution loop: claim a job, run its stage handler, advance state.
 
 A worker claims one job and drives it stage-by-stage until it reaches a terminal
-state, pauses into ``retry_wait``, or fails. Stage handlers are injected, so the
-loop is testable without any real video pipeline.
+state, pauses into ``retry_wait``, or fails. Handlers receive a ``StageContext``
+so long-running stages can renew their lease and check for cancellation between
+units of work. The loop uses a real clock by default, injectable for tests.
 """
 
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -18,7 +20,9 @@ from evoblue_video_mcp.storage.repository import (
     claim_next_job,
     commit_artifact_and_advance,
     get_job,
+    is_cancel_requested,
     mark_failure,
+    renew_lease,
 )
 
 MISSING_HANDLER_ERROR = "INTERNAL_ERROR"
@@ -26,11 +30,7 @@ DEFAULT_RETRY_DELAY = 60.0
 
 
 def _sanitize_error(exc: Exception) -> str:
-    """Return a safe description of an unexpected exception, never its message.
-
-    Unexpected exception messages may carry URLs, headers, or credential
-    fragments, so only the exception type name is persisted.
-    """
+    """Return a safe description of an unexpected exception, never its message."""
     return type(exc).__name__
 
 
@@ -89,8 +89,19 @@ class StageOutcome:
         return cls(error_code=error_code, error_detail=error_detail)
 
 
+@dataclass(frozen=True)
+class StageContext:
+    """Services a stage can use to renew its lease and observe cancellation."""
+
+    owner: str
+    lease_seconds: float
+    now: Callable[[], float]
+    renew_lease: Callable[[], Awaitable[bool]]
+    is_cancelled: Callable[[], Awaitable[bool]]
+
+
 class StageHandler(Protocol):
-    async def execute(self, job: Job, session: AsyncSession) -> StageOutcome: ...
+    async def execute(self, job: Job, session: AsyncSession, ctx: StageContext) -> StageOutcome: ...
 
 
 async def run_worker_once(
@@ -98,14 +109,26 @@ async def run_worker_once(
     *,
     owner: str,
     lease_seconds: float,
-    now: float,
+    now_fn: Callable[[], float] | None = None,
     handlers: Mapping[JobStatus, StageHandler],
 ) -> Job | None:
     """Claim one job and drive it through its stages; returns the job or ``None`` if idle."""
+    now = now_fn or time.time
     async with session_factory() as sess:
-        job = await claim_next_job(sess, owner=owner, lease_seconds=lease_seconds, now=now)
+        job = await claim_next_job(sess, owner=owner, lease_seconds=lease_seconds, now=now())
         if job is None:
             return None
+        job_id = job.job_id
+
+        ctx = StageContext(
+            owner=owner,
+            lease_seconds=lease_seconds,
+            now=now,
+            renew_lease=lambda: renew_lease(
+                sess, job_id=job_id, owner=owner, now=now(), lease_seconds=lease_seconds
+            ),
+            is_cancelled=lambda: is_cancel_requested(sess, job_id=job_id),
+        )
 
         while True:
             status = JobStatus(job.status)
@@ -118,7 +141,7 @@ async def run_worker_once(
                     sess,
                     job_id=job.job_id,
                     owner=owner,
-                    now=now,
+                    now=now(),
                     error_code=MISSING_HANDLER_ERROR,
                     retryable=False,
                     error_detail=f"no handler for stage {status.value}",
@@ -126,7 +149,7 @@ async def run_worker_once(
                 break
 
             try:
-                outcome = await handler.execute(job, sess)
+                outcome = await handler.execute(job, sess, ctx)
             except Exception as exc:
                 # Any unexpected handler exception fails the job instead of
                 # leaving it running forever. CancelledError is not an Exception.
@@ -134,7 +157,7 @@ async def run_worker_once(
                     sess,
                     job_id=job.job_id,
                     owner=owner,
-                    now=now,
+                    now=now(),
                     error_code="INTERNAL_ERROR",
                     retryable=False,
                     error_detail=_sanitize_error(exc),
@@ -144,12 +167,12 @@ async def run_worker_once(
             if outcome.error_code is not None:
                 next_retry_at = outcome.next_retry_at
                 if next_retry_at is None and outcome.retryable:
-                    next_retry_at = now + DEFAULT_RETRY_DELAY
+                    next_retry_at = now() + DEFAULT_RETRY_DELAY
                 await mark_failure(
                     sess,
                     job_id=job.job_id,
                     owner=owner,
-                    now=now,
+                    now=now(),
                     error_code=outcome.error_code,
                     retryable=outcome.retryable,
                     next_retry_at=next_retry_at,
@@ -162,7 +185,7 @@ async def run_worker_once(
                     sess,
                     job_id=job.job_id,
                     owner=owner,
-                    now=now,
+                    now=now(),
                     error_code=MISSING_HANDLER_ERROR,
                     retryable=False,
                     error_detail="handler returned no target",
@@ -175,7 +198,7 @@ async def run_worker_once(
                     job_id=job.job_id,
                     owner=owner,
                     to_status=outcome.target,
-                    now=now,
+                    now=now(),
                     lease_seconds=lease_seconds,
                     progress=outcome.progress,
                     stage=outcome.artifact.stage,
@@ -194,7 +217,7 @@ async def run_worker_once(
                     job_id=job.job_id,
                     owner=owner,
                     to_status=outcome.target,
-                    now=now,
+                    now=now(),
                     lease_seconds=lease_seconds,
                     progress=outcome.progress,
                 )

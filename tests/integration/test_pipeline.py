@@ -28,6 +28,10 @@ from evoblue_video_mcp.storage.artifact_store import ArtifactStore
 from evoblue_video_mcp.storage.models import JobArtifact
 
 
+def _now() -> float:
+    return 1000.0
+
+
 class _FakeAdapter:
     def supports(self, ref: VideoRef) -> bool:
         return True
@@ -79,7 +83,7 @@ async def test_metadata_and_subtitle_artifacts_are_registered(
         job_id = submitted.job_id
 
     job = await run_worker_once(
-        session_factory, owner="w1", lease_seconds=30.0, now=1000.0, handlers=handlers
+        session_factory, owner="w1", lease_seconds=30.0, now_fn=_now, handlers=handlers
     )
     assert job is not None
     # The two implemented stages succeed, but cleaning_transcript has no handler yet,
@@ -116,7 +120,7 @@ async def test_failure_maps_error_detail(
         )
 
     job = await run_worker_once(
-        session_factory, owner="w1", lease_seconds=30.0, now=1000.0, handlers=handlers
+        session_factory, owner="w1", lease_seconds=30.0, now_fn=_now, handlers=handlers
     )
     assert job is not None
     assert job.status == JobStatus.FAILED.value
@@ -154,7 +158,7 @@ async def test_full_pipeline_generates_markdown_report(
         assert reused is False
 
     job = await run_worker_once(
-        session_factory, owner="w1", lease_seconds=30.0, now=1000.0, handlers=handlers
+        session_factory, owner="w1", lease_seconds=30.0, now_fn=_now, handlers=handlers
     )
     assert job is not None
     assert job.status == JobStatus.COMPLETED.value

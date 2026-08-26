@@ -514,3 +514,36 @@ async def get_artifact(
             )
         )
     ).first()
+
+
+async def renew_lease(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    owner: str,
+    now: float,
+    lease_seconds: float,
+) -> bool:
+    """Renew a live lease; return False if the lease was lost."""
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.job_id == job_id,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(lease_expires_at=now + lease_seconds, updated_at=now)
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        return False
+    await session.commit()
+    return True
+
+
+async def is_cancel_requested(session: AsyncSession, *, job_id: str) -> bool:
+    """Return True if the job has a pending cancellation request."""
+    job = await _get(session, job_id)
+    return job is not None and job.cancel_requested_at is not None
