@@ -7,8 +7,8 @@
 ## 当前阶段
 
 - 初始化日期：2026-08-24
-- 当前阶段：P3 — 历史、Markdown、FTS5、索引重建（P2 已验收；P6/ASR 的 ASR-0～ASR-3 已完成，ASR-4 待开工）
-- P1/P2 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环；ASR 兜底下一主矛盾转入 Model Manager 与中国下载链路。
+- 当前阶段：P3 — 历史、Markdown、FTS5、索引重建（四合同已冻结，实现待开工；P2 已验收；P6/ASR 的 ASR-0～ASR-4 已全部完成并收口）
+- P1/P2 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环；P6/ASR 全链路（Provider 分层、Model Manager、路由、基准门禁、打包矩阵与发布验证）完成，Standard 已过审为正式默认模型。
 
 ## Owner Context
 
@@ -57,7 +57,9 @@
 - **ASR-1 已完成**：Lite/Standard 已通过真实模型加载与转写、60 分钟有界单调分段、运行中取消后的 checkpoint/resume 和许可证清单验收；Fake 全绿不得替代真实引擎门禁。
 - **模型许可必须落到精确制品**：代码仓库许可证不等于模型权重或转换归档许可证。SenseVoice 制品按 FunASR Model License 1.1 留证；Zipformer 精确归档的使用/再分发声明尚待确认。生产 Manifest 必须区分 `upstream_only`、`mirror_approved` 与 `blocked`；未审批镜像不得成为下载源。
 - **ASR-2 模型交付已落地**：`asr/manifests.py` 内置 Lite/Standard 生产 Manifest（`upstream_only`，钉实测逐文件 SHA）；`installer` 多源回退（某源失败切下一源即从零下载，坏 partial 不跨源续传）；`asr/service.py` + `/api/models` + 前端 `/models` 页提供安装/取消/卸载。中国源按「器械+留证、暂不落镜像」交付：hf-mirror 实测可达可续传，但散文件 SHA 与归档不同、Lite 归档无许可证，故不 ship 任何 `mirror_approved` 源（见 `docs/ASR_CHINA_SOURCE_QUALIFICATION.md`）。
-- **ASR-3 路由闭环已落地**：语言感知路由优先复用已安装模型；SenseVoice 覆盖语言不要求 Whisper，其他语言只建议可选 `whisper-cpp-base`。缺模型进入非 claimable 的 `waiting_for_model`，持久化单一安装建议且不隐式下载；恢复走统一 reconciliation（双门禁：SQLite 安装记录 + Provider 已注册；触发点为 Engine 启动、安装完成、保存 whisper CLI 路径），消除安装提交后崩溃导致的永久等待，CLI 后配置也能自动恢复。Silero VAD 是随包受管依赖（识别归档不含 VAD，`asr/vad.py` 钉 SHA 校验，资源访问全程包在故障边界内——缺失/不可读只降级为 Tier 未就绪，绝不阻塞 Engine 启动）；Provider 注册是期望状态对账：CLI 更换/清空与模型文件删除会替换或注销注册（所有权按实例追踪，外部注册不受影响），卸载模型即时注销引擎；Provider 加载失败只让该 Tier 保持未注册（已知坏签名仅事件路径重试），绝不阻塞 Engine 启动，加载失败日志只记 provider_id + 稳定错误码 + 异常类型。Silero MIT 完整许可文本已随包与第三方声明落证。应用级固定 Provider 覆盖自动路由，报告记录实际 provider/model/version。Lite 可安装和明确选择，但精确制品许可证未确认且 ASR-4 基准未完成，任何 Tier 都不得标记为正式默认已批准。
+- **P3 四合同已冻结（2026-08-28）**：Markdown Schema v1.0 见 `docs/MARKDOWN_SCHEMA.md`（frontmatter 字段表 + 段落解析锚点，`analysis_id ≡ job_id`）；历史/搜索 REST API 见 `docs/HISTORY_SEARCH_API.md`（新端点用 `{"error":{code,message}}` 信封，旧端点 P4 统一）；FTS5 与迁移 v8 见 `docs/FTS5_SCHEMA.md`（自带文本 FTS5 表，`rowid == report_documents.id`，中文检索 = unicode61 + CJK 单字切分，索引与查询同构预处理）；重建行为见 `docs/INDEX_REBUILD.md`（唯一确定性重扫算法，永不写用户 `.md`，幂等重跑即崩溃恢复）。实现必须逐字符转录合同 DDL；迁移文件归 P3 所有，ASR-4 并行拥有 `asr/`、许可证、打包与 CI。
+- **ASR-3 路由闭环已落地**：语言感知路由优先复用已安装模型；SenseVoice 覆盖语言不要求 Whisper，其他语言只建议可选 `whisper-cpp-base`。缺模型进入非 claimable 的 `waiting_for_model`，持久化单一安装建议且不隐式下载；恢复走统一 reconciliation（双门禁：SQLite 安装记录 + Provider 已注册；触发点为 Engine 启动、安装完成、保存 whisper CLI 路径），消除安装提交后崩溃导致的永久等待，CLI 后配置也能自动恢复。Silero VAD 是随包受管依赖（识别归档不含 VAD，`asr/vad.py` 钉 SHA 校验，资源访问全程包在故障边界内——缺失/不可读只降级为 Tier 未就绪，绝不阻塞 Engine 启动）；Provider 注册是期望状态对账：CLI 更换/清空与模型文件删除会替换或注销注册（所有权按实例追踪，外部注册不受影响），卸载模型即时注销引擎；Provider 加载失败只让该 Tier 保持未注册（已知坏签名仅事件路径重试），绝不阻塞 Engine 启动，加载失败日志只记 provider_id + 稳定错误码 + 异常类型。Silero MIT 完整许可文本已随包与第三方声明落证。应用级固定 Provider 覆盖自动路由，报告记录实际 provider/model/version。
+- **ASR-4 基准门禁与正式默认审批（2026-08-28）**：默认模型身份只能来自 `asr/approvals.py` 的审批注册表，按精确 `(model_id, version)` 记录——模型换版本即失效，必须重跑门禁，不得继承。门禁证据见 `docs/ASR_RELEASE_GATE.md` 与 `benchmarks/results/`：**Standard SenseVoiceSmall INT8 全项通过，是唯一的正式默认**（zh/mixed 自动推荐）；**Lite Zipformer 未过审**（TTS 语料 v1 实体召回 0.50 < 0.60，且归档无许可证文件），保持可安装、可显式选择、绝不自动推荐；whisper-cpp-base 无基准测量，仅是覆盖外语言的路由建议，不是正式默认。基准语料为 TTS 合成（质量下界），换语料或换阈值版本都必须重审。打包矩阵：PyInstaller onedir base（无 ASR 运行时）/ full（含 sherpa+onnxruntime+numpy）双变体，模型权重永不入包，体积增量实测记录于 `docs/RELEASE_VERIFICATION.md`；发布验证以 `scripts/verify_release.py` + 人工清单为准。
 
 ## Environment & Commands
 
@@ -68,6 +70,15 @@ uv run ruff check .
 uv run mypy src
 uv run pytest
 cd frontend && npm install && npm run lint && npm run test -- --run && npm run build
+```
+
+ASR/发布专用命令：
+
+```bash
+uv run python scripts/build_benchmark_corpus.py --out benchmarks/corpus   # 生成基准语料（Windows）
+uv run python -m evoblue_video_mcp.asr.benchmark benchmarks/corpus/corpus.json --provider standard --gate
+uv run python scripts/build_package.py        # PyInstaller base+full 双变体
+uv run python scripts/verify_release.py dist/evoblue-video-mcp-full   # 打包链路验证
 ```
 
 - 后端健康检查合同：`GET /api/health`。

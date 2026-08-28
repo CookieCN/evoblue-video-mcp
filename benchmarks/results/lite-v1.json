@@ -1,0 +1,206 @@
+{
+  "benchmark_meta": {
+    "cpu_count": 12,
+    "peak_rss_bytes": 636043264.0,
+    "peak_rss_delta_bytes": 125489152.0,
+    "platform": "Windows-11-10.0.22631-SP0",
+    "python": "3.12.11",
+    "thresholds_version": "v1"
+  },
+  "corpus": "evoblue-asr-gate-v1",
+  "gate": {
+    "items": [
+      {
+        "detail": "mean CER 0.0824 over 8 zh samples (threshold <= 0.25)",
+        "name": "chinese_cer",
+        "passed": true
+      },
+      {
+        "detail": "mean entity recall 0.5000 over 6 samples (threshold >= 0.6)",
+        "name": "entity_recall",
+        "passed": false
+      },
+      {
+        "detail": "mean RTF 0.0273 (worst 0.0340) over 11 samples (threshold mean <= 0.15)",
+        "name": "rtf",
+        "passed": true
+      },
+      {
+        "detail": "0.0000 of empty-reference samples produced text (threshold <= 0.0)",
+        "name": "hallucination_rate",
+        "passed": true
+      }
+    ],
+    "passed": false,
+    "thresholds_version": "v1",
+    "tier": "lite"
+  },
+  "provider": "sherpa-onnx-lite",
+  "results": [
+    {
+      "audio_seconds": 7.527,
+      "cer": 0.0,
+      "empty_reference": false,
+      "entity_count": 1,
+      "entity_recall": 1.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0307,
+      "sample_id": "zh-studio-001",
+      "transcribe_seconds": 0.231,
+      "wer": 0.666667
+    },
+    {
+      "audio_seconds": 7.122,
+      "cer": 0.0,
+      "empty_reference": false,
+      "entity_count": 0,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0305,
+      "sample_id": "zh-studio-002",
+      "transcribe_seconds": 0.217,
+      "wer": 1.0
+    },
+    {
+      "audio_seconds": 6.692,
+      "cer": 0.0,
+      "empty_reference": false,
+      "entity_count": 1,
+      "entity_recall": 1.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0332,
+      "sample_id": "zh-noise-001",
+      "transcribe_seconds": 0.222,
+      "wer": 1.0
+    },
+    {
+      "audio_seconds": 7.742,
+      "cer": 0.0,
+      "empty_reference": false,
+      "entity_count": 0,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.034,
+      "sample_id": "zh-music-001",
+      "transcribe_seconds": 0.263,
+      "wer": 1.0
+    },
+    {
+      "audio_seconds": 7.712,
+      "cer": 0.235294,
+      "empty_reference": false,
+      "entity_count": 2,
+      "entity_recall": 0.5,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0312,
+      "sample_id": "zh-entity-001",
+      "transcribe_seconds": 0.241,
+      "wer": 0.5
+    },
+    {
+      "audio_seconds": 6.981,
+      "cer": 0.181818,
+      "empty_reference": false,
+      "entity_count": 2,
+      "entity_recall": 0.5,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0332,
+      "sample_id": "zh-entity-002",
+      "transcribe_seconds": 0.232,
+      "wer": 0.5
+    },
+    {
+      "audio_seconds": 20.293,
+      "cer": 0.016129,
+      "empty_reference": false,
+      "entity_count": 0,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.03,
+      "sample_id": "zh-long-001",
+      "transcribe_seconds": 0.609,
+      "wer": 1.0
+    },
+    {
+      "audio_seconds": 5.524,
+      "cer": 0.904762,
+      "empty_reference": false,
+      "entity_count": 1,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "en",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0293,
+      "sample_id": "en-studio-001",
+      "transcribe_seconds": 0.162,
+      "wer": 1.0
+    },
+    {
+      "audio_seconds": 7.772,
+      "cer": 0.225806,
+      "empty_reference": false,
+      "entity_count": 1,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0312,
+      "sample_id": "zh-en-001",
+      "transcribe_seconds": 0.243,
+      "wer": 0.75
+    },
+    {
+      "audio_seconds": 3.0,
+      "cer": 0.0,
+      "empty_reference": true,
+      "entity_count": 0,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0081,
+      "sample_id": "zh-silence-001",
+      "transcribe_seconds": 0.024,
+      "wer": 0.0
+    },
+    {
+      "audio_seconds": 3.0,
+      "cer": 0.0,
+      "empty_reference": true,
+      "entity_count": 0,
+      "entity_recall": 0.0,
+      "hallucinated": false,
+      "language": "zh",
+      "model_id": "zipformer-ctc-small-zh-int8",
+      "provider_id": "sherpa-onnx-lite",
+      "rtf": 0.0089,
+      "sample_id": "zh-musiconly-001",
+      "transcribe_seconds": 0.027,
+      "wer": 0.0
+    }
+  ]
+}

@@ -73,8 +73,9 @@ def route_asr(
         if option is not None:
             return _decision(option)
 
-    # The exact Lite archive license is still unconfirmed. It may be installed
-    # and explicitly selected, but must not become the automatic recommendation.
+    # Lite is installable and explicitly selectable but never the automatic
+    # recommendation: the recorded ASR-4 release gate failed it (entity recall
+    # below threshold; archive license unconfirmed) — see asr/approvals.py.
     recommended_ids: tuple[str, ...] = (
         ("sherpa-onnx-standard",) if lang in SENSEVOICE_LANGUAGES or lang is None
         else ("whisper-cpp-base",)

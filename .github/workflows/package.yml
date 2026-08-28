@@ -1,0 +1,49 @@
+# Packaging matrix (ASR-4): build the PyInstaller onedir bundles on every push.
+# Artifacts are uploaded for inspection; nothing is published or released
+# (publishing is P7 and stays a manual, owner-gated action).
+
+name: package
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            variants: "base,full"
+          - os: macos-14
+            variants: "full"
+          - os: ubuntu-22.04
+            variants: "full"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - run: uv sync --extra dev --extra package --extra asr
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - name: Build package variants
+        shell: bash
+        run: uv run python scripts/build_package.py --variants "${{ matrix.variants }}"
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: evoblue-video-mcp-${{ matrix.os }}
+          path: dist/evoblue-video-mcp-*/
+          retention-days: 7
+          if-no-files-found: error

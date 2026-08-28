@@ -6,55 +6,214 @@
       "name": "P0 Harness, contracts, and skeleton",
       "status": "done",
       "features": [
-        {"id": "P0-001", "name": "Harness infrastructure", "status": "done"},
-        {"id": "P0-002", "name": "Product and architecture contracts", "status": "done"},
-        {"id": "P0-003", "name": "MCP tool and job state contracts", "status": "done"},
-        {"id": "P0-004", "name": "Markdown and WebUI contracts", "status": "done"},
-        {"id": "P0-005", "name": "Backend and frontend skeleton", "status": "done"},
-        {"id": "P0-006", "name": "Baseline CI and tests", "status": "done"}
+        {
+          "id": "P0-001",
+          "name": "Harness infrastructure",
+          "status": "done"
+        },
+        {
+          "id": "P0-002",
+          "name": "Product and architecture contracts",
+          "status": "done"
+        },
+        {
+          "id": "P0-003",
+          "name": "MCP tool and job state contracts",
+          "status": "done"
+        },
+        {
+          "id": "P0-004",
+          "name": "Markdown and WebUI contracts",
+          "status": "done"
+        },
+        {
+          "id": "P0-005",
+          "name": "Backend and frontend skeleton",
+          "status": "done"
+        },
+        {
+          "id": "P0-006",
+          "name": "Baseline CI and tests",
+          "status": "done"
+        }
       ]
     },
     "p1_engine_core": {
       "name": "P1 SQLite job model, migration, and single-owner lease",
       "status": "done",
       "features": [
-        {"id": "P1-001", "name": "SQLite schema init + versioned migration", "status": "done"},
-        {"id": "P1-002", "name": "Job state-machine transition rules", "status": "done"},
-        {"id": "P1-003", "name": "Atomic single-owner lease claim", "status": "done"},
-        {"id": "P1-004", "name": "Crash + lease-expiry recovery", "status": "done"},
-        {"id": "P1-005", "name": "Terminal-state re-execution guard", "status": "done"},
-        {"id": "P1-006", "name": "Offline unit/integration tests", "status": "done"},
-        {"id": "P1-007", "name": "Worker execution loop skeleton", "status": "done"},
-        {"id": "P1-008", "name": "Engine startup recovery", "status": "done"},
-        {"id": "P1-009", "name": "WebUI API and first-setup skeleton", "status": "done"}
+        {
+          "id": "P1-001",
+          "name": "SQLite schema init + versioned migration",
+          "status": "done"
+        },
+        {
+          "id": "P1-002",
+          "name": "Job state-machine transition rules",
+          "status": "done"
+        },
+        {
+          "id": "P1-003",
+          "name": "Atomic single-owner lease claim",
+          "status": "done"
+        },
+        {
+          "id": "P1-004",
+          "name": "Crash + lease-expiry recovery",
+          "status": "done"
+        },
+        {
+          "id": "P1-005",
+          "name": "Terminal-state re-execution guard",
+          "status": "done"
+        },
+        {
+          "id": "P1-006",
+          "name": "Offline unit/integration tests",
+          "status": "done"
+        },
+        {
+          "id": "P1-007",
+          "name": "Worker execution loop skeleton",
+          "status": "done"
+        },
+        {
+          "id": "P1-008",
+          "name": "Engine startup recovery",
+          "status": "done"
+        },
+        {
+          "id": "P1-009",
+          "name": "WebUI API and first-setup skeleton",
+          "status": "done"
+        }
       ]
     },
     "delivery_roadmap": {
       "name": "Post-P0 delivery phases",
       "status": "planned",
       "features": [
-        {"id": "P1", "name": "Local Engine, SQLite, Worker, WebUI framework", "status": "done"},
-        {"id": "P2", "name": "YouTube/Bilibili subtitle analysis loop", "status": "done"},
-        {"id": "P3", "name": "History, Markdown, FTS5, index rebuild", "status": "planned"},
-        {"id": "P4", "name": "STDIO MCP Bridge and four clients", "status": "planned"},
-        {"id": "P5", "name": "WebUI MCP configuration and handshake", "status": "planned"},
-        {"id": "P6", "name": "Pluggable ASR, model management, and recovery", "status": "in_progress"},
-        {"id": "P7", "name": "Windows installer and GitHub Release", "status": "planned"},
-        {"id": "P8", "name": "Public testing and Harness hardening", "status": "planned"}
+        {
+          "id": "P1",
+          "name": "Local Engine, SQLite, Worker, WebUI framework",
+          "status": "done"
+        },
+        {
+          "id": "P2",
+          "name": "YouTube/Bilibili subtitle analysis loop",
+          "status": "done"
+        },
+        {
+          "id": "P3",
+          "name": "History, Markdown, FTS5, index rebuild",
+          "status": "in_progress"
+        },
+        {
+          "id": "P4",
+          "name": "STDIO MCP Bridge and four clients",
+          "status": "planned"
+        },
+        {
+          "id": "P5",
+          "name": "WebUI MCP configuration and handshake",
+          "status": "planned"
+        },
+        {
+          "id": "P6",
+          "name": "Pluggable ASR, model management, and recovery",
+          "status": "done"
+        },
+        {
+          "id": "P7",
+          "name": "Windows installer and GitHub Release",
+          "status": "planned"
+        },
+        {
+          "id": "P8",
+          "name": "Public testing and Harness hardening",
+          "status": "planned"
+        }
       ]
     },
     "p6_asr": {
       "name": "P6 Pluggable local ASR and model delivery",
-      "status": "in_progress",
+      "status": "done",
       "contract": "docs/ASR_PLAN.md",
       "features": [
-        {"id": "ASR-0", "name": "Provider contract, model manifest, and benchmark fixture", "status": "done"},
-        {"id": "ASR-1", "name": "sherpa-onnx Lite Zipformer + Standard SenseVoice proof of capability", "status": "done"},
-        {"id": "ASR-2", "name": "Resumable Model Manager and China download path", "status": "done"},
-        {"id": "ASR-3", "name": "Lite/Standard tier routing and optional whisper.cpp fallback", "status": "done"},
-        {"id": "ASR-4", "name": "Packaging, license, benchmark, and release hardening", "status": "planned"}
+        {
+          "id": "ASR-0",
+          "name": "Provider contract, model manifest, and benchmark fixture",
+          "status": "done"
+        },
+        {
+          "id": "ASR-1",
+          "name": "sherpa-onnx Lite Zipformer + Standard SenseVoice proof of capability",
+          "status": "done"
+        },
+        {
+          "id": "ASR-2",
+          "name": "Resumable Model Manager and China download path",
+          "status": "done"
+        },
+        {
+          "id": "ASR-3",
+          "name": "Lite/Standard tier routing and optional whisper.cpp fallback",
+          "status": "done"
+        },
+        {
+          "id": "ASR-4",
+          "name": "Packaging, license, benchmark, and release hardening",
+          "status": "done"
+        }
+      ]
+    },
+    "p3_history_index": {
+      "name": "P3 History, Markdown, FTS5, and index rebuild",
+      "status": "in_progress",
+      "contract": "docs/FTS5_SCHEMA.md + docs/INDEX_REBUILD.md + docs/HISTORY_SEARCH_API.md + docs/MARKDOWN_SCHEMA.md",
+      "features": [
+        {
+          "id": "P3-001",
+          "name": "Markdown Schema v1.0 frozen (field table, section anchors, naming)",
+          "status": "done"
+        },
+        {
+          "id": "P3-002",
+          "name": "History/Search REST API contract frozen (endpoints, error envelope, P4 mapping)",
+          "status": "done"
+        },
+        {
+          "id": "P3-003",
+          "name": "FTS5 schema + migration v8 contract frozen (DDL, CJK query contract)",
+          "status": "done"
+        },
+        {
+          "id": "P3-004",
+          "name": "Index rebuild behavior contract frozen (single rescan, quarantine, acceptance)",
+          "status": "done"
+        },
+        {
+          "id": "P3-005",
+          "name": "Migration v8 + report/FTS repositories implemented",
+          "status": "planned"
+        },
+        {
+          "id": "P3-006",
+          "name": "Pipeline indexing stage + history/search/index API endpoints implemented",
+          "status": "planned"
+        },
+        {
+          "id": "P3-007",
+          "name": "Rebuild engine + PRD P3 acceptance tests (delete SQLite, rebuild searchable)",
+          "status": "planned"
+        }
       ]
     }
   },
-  "summary": {"done": 21, "in_progress": 1, "planned": 6, "completion_pct": 75.0}
+  "summary": {
+    "done": 27,
+    "in_progress": 1,
+    "planned": 7,
+    "completion_pct": 77.1
+  }
 }

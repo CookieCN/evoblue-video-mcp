@@ -391,7 +391,12 @@ function Models() {
               )}
               {m.tier === "lite" && !m.formal_default && (
                 <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                  精确制品许可证尚未确认：可安装和明确选择，但当前不作为正式默认推荐。
+                  未通过正式默认门禁（基准实体召回不足，精确制品许可证未确认）：可安装和明确选择，但当前不作为自动推荐。
+                </p>
+              )}
+              {m.formal_default && (
+                <p className="mt-3 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">
+                  已通过基准与许可门禁，作为正式默认推荐。
                 </p>
               )}
 

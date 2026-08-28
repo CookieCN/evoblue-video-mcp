@@ -139,3 +139,41 @@
 **Solution**：增加非 claimable 的 `waiting_for_model` 状态；进入时释放租约并钉住 provider/model/version + 单一推荐模型。Model Manager 只有在用户显式安装成功后才将匹配任务原子恢复到 `transcribing`，Worker 再按已钉路由继续。
 
 **Rule**：等待用户安装、授权或挂载的外部能力必须使用显式持久等待态，释放执行租约、禁止定时空转，并提供由具体外部事件触发的幂等恢复；路由选择需在等待前持久化。
+
+## 15. SAPI 强制非原生采样率会产出饱和垃圾音频
+
+**Problem**：用 `SpFileStream.Format.Type = SAFT16kHz16BitMono` 直接要求 16 kHz 输出，合成结果波形 RMS 恒为 0.996（削波饱和），ASR 模型 CER 高达 0.5–0.9；错误表象是「模型质量差」，实际是语料生成坏了。
+
+**Root Cause**：Desktop 语音（Huihui/Zira）原生 22.05 kHz，强制 SAPI 内部格式转换路径会产生饱和输出；另外不设置 `AudioOutputStream` 时 `Speak` 走扬声器而非文件流。
+
+**Solution**：始终以 `SAFTDefault`（原生格式）合成，再用 numpy 线性插值重采样到目标采样率；`sapi.AudioOutputStream = stream` 必须显式设置。
+
+**Rule**：ASR 基准语料生成后必须先检查波形能量（RMS 分布、峰值、语音/停顿结构）再跑评分；模型得分异常时先怀疑语料与评测链路，再怀疑模型。
+
+## 16. Windows ctypes 调 GetCurrentProcess 必须显式声明 64 位签名
+
+**Problem**：`ctypes.WinDLL("psapi").GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ...)` 静默失败返回 0，峰值内存测量拿不到数据且无异常。
+
+**Root Cause**：GetCurrentProcess 返回 64 位伪句柄（-1），ctypes 默认 restype 按 32 位 int 截断，API 收到被截断的句柄。
+
+**Solution**：`kernel32.GetCurrentProcess.restype = ctypes.c_void_p`，并为 GetProcessMemoryInfo 显式设置 argtypes/restype。
+
+**Rule**：任何返回句柄或指针的 Windows API 在 ctypes 中都必须显式声明 restype/argtypes，不能依赖默认 int 推断。
+
+## 17. PyInstaller 对运行时动态导入的驱动默认不收集
+
+**Problem**：打包后的引擎首启即崩：`ModuleNotFoundError: No module named 'aiosqlite'`——源码环境一切正常。
+
+**Root Cause**：SQLAlchemy 的 sqlite+aiosqlite 方言在 `create_async_engine` 时才字符串导入驱动，静态分析看不到；同类风险还有 uvicorn 的 loops/protocols 自动选择、keyring 平台后端。
+
+**Rule**：打包矩阵必须包含「干净数据目录首启」冒烟；spec 文件为每个运行时字符串导入点显式声明 hiddenimports（aiosqlite/sqlalchemy.dialects.sqlite/uvicorn.*/keyring.backends.*）。
+
+## 18. 门禁阈值冻结必须与 harness 调试期隔离，失败要留痕
+
+**Problem**：ASR-4 门禁前两轮结果（Standard CER 0.57）全部作废——是语料生成和 WER 归一化的 bug，不是模型差异；如果直接按作废轮次调阈值，会把 harness 缺陷冻进门禁。
+
+**Root Cause**：评测链路本身没有验证环节，坏语料产出的「差分」与真实模型差分无法从单次报告区分。
+
+**Solution**：先用已知可转写的真实音频（lei-jun-test.wav）做链路对照，波形能量检查定位语料问题；WER 改用保留词边界的 `normalize_words`，CER 保持去空白归一化。最终阈值只在修复后的链路上冻结一次。
+
+**Rule**：基准门禁文档必须记录被丢弃的运行及原因（harness-validation trail）；门禁对照真实音频样本先验证评测链路，再信任模型得分。

@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evoblue_video_mcp.asr.approvals import is_formal_default
 from evoblue_video_mcp.asr.installer import install_model
 from evoblue_video_mcp.asr.manifest import ModelManifest, is_releasable
 from evoblue_video_mcp.asr.manifests import BUILTIN_MANIFESTS
@@ -241,9 +242,9 @@ class ModelManagerService:
             status=op.status if op else None,
             downloaded_bytes=op.downloaded_bytes if op else 0,
             error_code=op.error_code if op else None,
-            # ASR-4 benchmark/release gates are not complete; ASR-3 may emit an
-            # automatic install recommendation without claiming formal approval.
-            formal_default=False,
+            # Approval is keyed by exact (model_id, version): the gate verdict
+            # applies only to the artifact that was actually benchmarked.
+            formal_default=is_formal_default(manifest.model_id, manifest.version),
         )
 
     async def list_models(self) -> list[ModelSummary]:

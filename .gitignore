@@ -23,3 +23,7 @@ frontend/coverage/
 Thumbs.db
 .npm-cache/
 
+
+# Generated ASR benchmark audio (permissioned TTS corpus, regenerated locally)
+benchmarks/corpus/
+benchmarks/_work/

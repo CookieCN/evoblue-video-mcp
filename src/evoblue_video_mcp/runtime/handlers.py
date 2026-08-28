@@ -12,6 +12,7 @@ from typing import Literal, cast
 from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from evoblue_video_mcp.asr.approvals import is_formal_default
 from evoblue_video_mcp.asr.base import ASRError, ASRRequest, ASRSegment, segment_key
 from evoblue_video_mcp.asr.registry import get_provider, list_providers
 from evoblue_video_mcp.asr.routing import ProviderOption, route_asr
@@ -386,7 +387,7 @@ async def _provider_options(session: AsyncSession) -> tuple[ProviderOption, ...]
                 "sherpa-onnx-lite" in installed_ids
                 and "zipformer-ctc-small-zh-int8" in installed_models
             ),
-            formal_default=False,
+            formal_default=is_formal_default("zipformer-ctc-small-zh-int8", "2025-07-16"),
         ),
         ProviderOption(
             provider_id="sherpa-onnx-standard",
@@ -398,7 +399,7 @@ async def _provider_options(session: AsyncSession) -> tuple[ProviderOption, ...]
                 "sherpa-onnx-standard" in installed_ids
                 and "sensevoice-small-int8" in installed_models
             ),
-            formal_default=False,
+            formal_default=is_formal_default("sensevoice-small-int8", "2024-07-17"),
         ),
         ProviderOption(
             provider_id="whisper-cpp-base",
@@ -410,7 +411,7 @@ async def _provider_options(session: AsyncSession) -> tuple[ProviderOption, ...]
                 "whisper-cpp-base" in installed_ids
                 and "whisper-cpp-base" in installed_models
             ),
-            formal_default=False,
+            formal_default=is_formal_default("whisper-cpp-base", "80da2d8"),
         ),
     ]
     known = {option.provider_id for option in options}
@@ -427,6 +428,7 @@ async def _provider_options(session: AsyncSession) -> tuple[ProviderOption, ...]
                 tier="custom",
                 languages=capabilities.languages,
                 installed=True,
+                # Custom/user providers never inherit a formal-default approval.
                 formal_default=False,
             )
         )

@@ -1,7 +1,40 @@
 """Deterministic scoring metrics for ASR benchmark output."""
 
+import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+# Fullwidth CJK punctuation is intentionally literal here (it is data to strip).
+_PUNCT = re.compile(r"[\s，。！？、；：\"'“”‘’（）\(\)\[\]【】,\.!\?;:]+")  # noqa: RUF001
+
+# Scoring keeps CJK ideographs, kana, hangul, Latin letters and digits; every
+# other codepoint (punctuation, symbols, whitespace) is dropped so a missing
+# sentence-final period is not scored as a character error.
+_SCORING_KEEP = re.compile(r"[^\w一-鿿぀-ヿ가-힯]+", re.UNICODE)
+
+# Word scoring keeps single spaces between tokens instead: WER compares
+# whitespace tokens, so collapsing all whitespace would turn every transcript
+# into one giant token and score 1.0 regardless of content.
+_SCORING_WORD = re.compile(r"[^\w一-鿿぀-ヿ가-힯]+", re.UNICODE)
+
+
+def normalize_for_scoring(text: str) -> str:
+    """Normalize transcript text for CER scoring.
+
+    NFKC folds fullwidth Latin/digits into ASCII; lowercasing unifies case;
+    punctuation and whitespace removal matches mainstream CER practice where
+    scores are computed on characters, not typography.
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    return _SCORING_KEEP.sub("", folded).lower()
+
+
+def normalize_words(text: str) -> str:
+    """Normalize transcript text for WER scoring, preserving token boundaries."""
+    folded = unicodedata.normalize("NFKC", text)
+    return _SCORING_WORD.sub(" ", folded).lower().strip()
+
 
 
 def _levenshtein(a: Sequence[str], b: Sequence[str]) -> int:
@@ -78,3 +111,19 @@ def segment_boundary_error(
         total += unmatched * 2 * mean_duration
 
     return total / (2 * max(n_ref, n_hyp))
+
+
+def entity_recall(entities: Sequence[str], hypothesis: str) -> float:
+    """Fraction of reference named entities that appear verbatim in the output.
+
+    Comparison strips whitespace/punctuation and lowercases Latin letters, so a
+    brand name survives surrounding punctuation but a mis-recognized character
+    still counts as a miss. An empty entity list scores 0.0 with count 0 —
+    callers decide whether that means "not measured" rather than a perfect or
+    failing score.
+    """
+    if not entities:
+        return 0.0
+    normalized = _PUNCT.sub("", hypothesis).lower()
+    hits = sum(1 for entity in entities if _PUNCT.sub("", entity).lower() in normalized)
+    return hits / len(entities)

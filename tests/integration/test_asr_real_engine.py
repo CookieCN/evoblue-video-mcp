@@ -21,8 +21,10 @@ from evoblue_video_mcp.asr.registration import (
 from evoblue_video_mcp.asr.registry import clear, get_provider
 
 MODEL_DIR = Path(user_data_path("EvoBlue Video MCP", "EvoBlue")) / "models"
-STANDARD_DIR = MODEL_DIR / "sensevoice-small-int8"
-LITE_DIR = MODEL_DIR / "zipformer-ctc-small-zh-int8"
+# Production layout: models/<model_id>/<version>/ (same paths the Model
+# Manager installs to and the registration reconcile reads).
+STANDARD_DIR = MODEL_DIR / "sensevoice-small-int8" / "2024-07-17"
+LITE_DIR = MODEL_DIR / "zipformer-ctc-small-zh-int8" / "2025-07-16"
 VAD_MODEL = MODEL_DIR / "silero_vad.onnx"
 TEST_WAV = MODEL_DIR / "lei-jun-test.wav"
 

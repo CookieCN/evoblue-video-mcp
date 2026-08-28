@@ -1,8 +1,29 @@
 # Third-Party Notices
 
-本项目计划使用的第三方依赖及其许可证将在锁定依赖和发布构建时由自动化清单生成并审查。P0 不捆绑二进制依赖、FFmpeg、Whisper 模型或旧 EvoBlue 代码。
+自 ASR-4 起，本文件随发布包分发（`scripts/build_package.py` 拷入 bundle 根目录）。以下为当前锁定（`uv.lock`，2026-08-28）的主要运行时依赖与许可证；传递依赖的完整清单以 `uv.lock` 为准。模型权重（SenseVoiceSmall、Zipformer CTC、Silero VAD、Whisper Base ggml）的许可证与署名清单见 [docs/ASR_MODEL_LICENSES.md](docs/ASR_MODEL_LICENSES.md)。
 
-ASR 模型权重（SenseVoiceSmall、Zipformer CTC、Silero VAD、Whisper Base ggml）的许可证与署名清单见 [docs/ASR_MODEL_LICENSES.md](docs/ASR_MODEL_LICENSES.md)。
+## 随包运行时依赖（full 变体；base 变体不含 sherpa-onnx / onnxruntime / numpy）
+
+| 组件 | 锁定版本 | 许可证 | 用途 |
+|---|---|---|---|
+| sherpa-onnx | 1.13.6 | Apache-2.0 | 本地 ASR 推理运行时 |
+| onnxruntime | 1.29.0 | MIT | ONNX 推理（Windows 下固定 ≥1.27 规避 System32 旧 DLL） |
+| numpy | 2.2.6 | BSD-3-Clause | 音频采样处理 |
+| fastapi | 0.141.1 | MIT | HTTP API |
+| starlette | 1.6.0 | BSD-3-Clause | ASGI 框架 |
+| uvicorn | 0.52.4 | BSD-3-Clause | ASGI 服务器 |
+| sqlalchemy | 2.0.52 | MIT | ORM / 迁移 |
+| aiosqlite | 0.22.1 | MIT | 异步 SQLite 驱动 |
+| httpx | 0.28.1 | BSD-3-Clause | HTTP 客户端（模型下载、LLM） |
+| yt-dlp | 2026.8.19 | Unlicense | 平台元数据与字幕抓取 |
+| keyring | 25.7.0 | MIT | 系统凭据库 |
+| mcp | 2.0.0 | MIT | MCP 协议（P4 STDIO Bridge） |
+| pydantic / pydantic-settings | 2.13.4 / 2.15.0 | MIT | 合同与配置 |
+| platformdirs | 4.11.4 | MIT | 平台标准数据目录 |
+| structlog | 25.5.0 | Apache-2.0 / MIT | 结构化日志 |
+| tenacity | 9.1.4 | Apache-2.0 | 重试 |
+
+代码仓库自身许可证为 Apache-2.0（见 `LICENSE`）。P0 约定继续有效：不捆绑 FFmpeg、Whisper 模型或旧 EvoBlue 代码。
 
 ## 随包分发的模型资产
 

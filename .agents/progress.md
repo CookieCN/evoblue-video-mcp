@@ -2,6 +2,10 @@
 
 ## 当前状态
 
+ASR-4 已完成，P6/ASR 全部收口（ASR-0～ASR-4 done）。基准门禁机制（`asr/release_gate.py` 冻结阈值 v1 + `asr/benchmark` 真实 Provider/RTF/实体召回/峰值内存 + TTS 语料生成器 `scripts/build_benchmark_corpus.py`）真实执行：**Standard SenseVoice 全项通过（zh CER 0.0 / en WER 0.077 / 实体召回 1.0 / RTF 0.06 / 峰值 537 MB），审批为正式默认模型；Lite Zipformer 实体召回 0.50 < 0.60 未过门禁**（英文品牌名场景弱），连同归档无许可证文件，保持「可安装、可显式选择、不自动推荐」。审批按精确 `(model_id, version)` 记录在 `asr/approvals.py`，版本变更即失效重审；证据见 `docs/ASR_RELEASE_GATE.md` 与 `benchmarks/results/`。打包矩阵落地：新增 `__main__.py` 生产入口（loopback uvicorn + production token 首启生成持久化 + WebUI 静态挂载 API 优先）、PyInstaller onedir 双变体 **base 47.4 MB / full 120.9 MB（ASR 运行时增量 73.5 MB 实测）**、CI `package` 三 OS 矩阵（仅产物，不发布）；`scripts/verify_release.py` 打包链路验证八项全过（干净档案启动、审批标志出包、production token 401/200、损坏模型下 Engine 存活 + `ASR_PROVIDER_LOAD_FAILED` 稳定错误码）。`docs/RELEASE_VERIFICATION.md`（含中国大陆网络 profile 人工清单）与 `docs/MIGRATION_ROLLBACK.md`（v1–v7 前向迁移 + 备份回滚演练）落地；`THIRD_PARTY_NOTICES.md` 升级为实际锁定依赖清单并随包分发。
+
+P3 已开工，四个合同已冻结并经一轮评审修复（2026-08-28）：Markdown Schema v1.0（`docs/MARKDOWN_SCHEMA.md` 冻结版 + tz-aware datetime 强制）、历史/搜索 REST API（`docs/HISTORY_SEARCH_API.md`，新端点引入 `{"error":{code,message}}` 信封 + `GET /api/index/issues` 诊断明细）、FTS5 Schema/迁移 v8（`docs/FTS5_SCHEMA.md`，自带文本 FTS5 表 + CJK 查询合同）、索引重建行为（`docs/INDEX_REBUILD.md`，唯一重扫算法 + 幂等崩溃恢复）。评审修复轮关闭 5 个 P1 + 2 个 P2：①查询合同改为「空白分词、连续 CJK 词组保持单短语（邻接语义）、词内引号双写转义」，反例「选品 vs 选择产品」实证通过；②`index_issues` open 去重改部分唯一索引 `uq_index_issues_open`（表级 UNIQUE 含 NULL 列无效）；③stale 语义统一为可搜索、保留 FTS 行、计入 verify_fts；④启动对账废除心跳宽限，持久化 `running` 一律孤儿化（单 Engine 绑定端口，启动即证明旧进程已死）；⑤重复 analysis_id 胜者 = 当前文件集排序最小路径，与数据库历史无关（删库收敛）。决策记录见 `docs/adr/0003`（含修订）；`scripts/verify_p3_contract.py` 从合同文档原文提取 DDL 执行，27 项检查全过（含全部评审反例）。文件所有权：P3 拥有 `storage/migrations.py`、`reports/`、`web/` 与上述合同；ASR-4 已收口。下一步按合同实现：迁移 v8 + repositories → Pipeline 索引阶段 + API 端点 → 重建引擎 + PRD P3 验收测试。
+
 P0、P1、P2 已完成：SQLite Job 模型与迁移、状态机转换规则、单 Worker 租约、Worker 执行循环骨架、Engine 启动恢复、WebUI 后端 API 与前端骨架，以及 P2 字幕分析闭环（平台识别、yt-dlp 元数据/字幕、清洗、分块、LLM 综合、Markdown 报告、生产 runtime 生命周期）。YouTube 真实验收通过；Bilibili 无 Cookie 字幕边界留白。
 
 ASR 方向已完成第二次规划校正：执行验证发现约 1.05 GB 的 SenseVoice 完整制品同时包含约 894 MB FP32 与约 228 MB INT8，并非 INT8 推理本身需要 1.05 GB。P6 改为同一 sherpa-onnx 运行时下的两级模型体验：约 63.4 MB 的离线 Zipformer CTC small INT8 为中文 Lite 候选，约 228 MB 的 INT8-only SenseVoiceSmall 为 Standard 候选；两者均须通过项目基准与许可证/中国下载门禁。
@@ -10,6 +14,8 @@ ASR-0～ASR-3 已完成。Windows 真实引擎阻塞已定位为 System32 的 ON
 
 ## 最近完成
 
+- [x] ASR-4 全部交付（2026-08-28）：基准门禁机制 + TTS 语料 v1 真实执行（Standard PASS→正式默认审批、Lite FAIL→不推荐）、`asr/approvals.py` 精确版本审批注册表接入 service/handlers/WebUI、PyInstaller onedir base/full 双变体（47.4/120.9 MB，增量 73.5 MB 实测）、生产入口 `__main__.py`、CI `package` 三 OS 矩阵、`verify_release.py` 八项打包链路验证全过、`docs/ASR_RELEASE_GATE.md` 证据与判决、`docs/RELEASE_VERIFICATION.md`、`docs/MIGRATION_ROLLBACK.md`、第三方声明锁定依赖清单入包。后端 pytest 全量 + mypy strict + ruff、前端 lint/test/build 全绿。
+- [x] P3 四合同冻结（2026-08-28）：`docs/MARKDOWN_SCHEMA.md` v1.0 冻结版、`docs/HISTORY_SEARCH_API.md`、`docs/FTS5_SCHEMA.md`（迁移 v8 DDL + CJK 查询合同）、`docs/INDEX_REBUILD.md`（验收标准 §7）+ ADR 0003；`scripts/verify_p3_contract.py` 从文档提取 DDL 实测 12/12 通过。实现（迁移 v8、repositories、Pipeline 索引阶段、API 端点、重建引擎）待开工，见 feature_list P3-005~007。
 - [x] ASR-3 终验通过（第五轮评审零新阻塞），正式标记 done；独立复核 43 项相关测试（含真实 ASR/生命周期/VAD 故障/注册所有权）与全量 356 项 + mypy strict + ruff 一致，形成 ASR-3 Git 提交边界。
 - [x] ASR-3 release hardening 第四轮：`asr/vad.py` 把资源发现（`files()`）、存在检查、字节读取、SHA 校验、`as_file()` materialize 全部包进故障边界——任何普通资源异常（wheel 漏打 assets / 文件不可读 / materialize 失败）记稳定错误码（`ASR_VAD_ASSET_MISSING` / `ASR_VAD_ASSET_HASH_MISMATCH` / `ASR_VAD_ASSET_UNAVAILABLE`）并返回 None，损坏安装降级为 sherpa Tier 未就绪而非 Engine 不可启动；Provider 加载失败日志脱敏为 provider_id + `ASR_PROVIDER_LOAD_FAILED` + 异常类型（不再输出含本机路径/用户名的原始消息与堆栈）；新增 6 个测试覆盖资源包缺失/读取失败/materialize 失败/注册路径存活/稳定错误码/日志脱敏；全量 pytest 356 + mypy strict + ruff 通过。
 - [x] ASR-3 release hardening 第三轮：`asr/registration.py` 构建异常隔离——Provider 加载失败（磁盘损坏/引擎不兼容）只让该 Tier 保持未注册并记录已知坏签名（高频 worker 轮询不重试重载，安装完成/设置保存事件路径 `retry_failed_loads=True` 重试），注册发生在 lifespan 之前故绝不阻塞 Engine 启动；`_MANAGED` 改记 signature + owned instance，注销前校验注册表对象仍是本模块构建的实例（外部覆盖不会被误注销），卸载统一走 `unregister_managed_provider()`；新增测试：损坏模型下 Engine 仍启动、whisper 任务恢复而 sherpa 任务保持等待、外部覆盖后输入消失不被注销、已知坏签名不重复重载；补齐 Silero MIT 完整许可文本（`asr/assets/silero_vad.LICENSE` 随包 + THIRD_PARTY_NOTICES 全文）并修正 `ASR_MODEL_LICENSES.md`「基础安装包不含模型权重」旧表述（提前完成一项 ASR-4 发布门禁）。
@@ -59,9 +65,10 @@ ASR-0～ASR-3 已完成。Windows 真实引擎阻塞已定位为 System32 的 ON
 
 | # | 事项 | 优先级 | 阶段 |
 |---|---|---|---|
-| 1 | ASR-4：打包矩阵、基准门禁、许可证/第三方声明与发布加固 | P1 | P6 |
+| 1 | P3 实现收尾：迁移 v8 + repositories → Pipeline 索引阶段 + API 端点 → 重建引擎 + PRD P3 验收测试 | P1 | P3 |
 | 2 | 统一 MCP 返回 Envelope：`docs/MCP_TOOLS.md` 的 `ok` 字段与 Pydantic 输出模型不一致 | P2 | P4 |
 | 3 | Bilibili Cookie 认证（降级为增强能力、不做前置；先确认登录后确实存在字幕再验证） | P3 | P2 |
+| 4 | 发布前：在最低规格目标机按 `docs/RELEASE_VERIFICATION.md` 跑人工清单（含中国大陆网络 profile 与真实模型下载续传） | P1（P7 前） | P7 |
 
 ## 已知问题
 
@@ -77,10 +84,10 @@ ASR-0～ASR-3 已完成。Windows 真实引擎阻塞已定位为 System32 的 ON
 | P0 | 完成 | Harness、边界、合同、最小骨架 | 无 | 合同齐全，骨架可导入，基础验证通过或明确环境缺失 |
 | P1 | 完成 | Local Engine、SQLite、Worker、WebUI 框架 | P0 | Engine 可恢复任务，WebUI 可观察任务与设置状态 |
 | P2 | 完成 | YouTube/Bilibili 字幕分析闭环 | P1 | 两平台有字幕视频可生成报告，失败有稳定错误码 |
-| P3 | 计划 | 历史、Markdown、FTS5、索引重建 | P2 | 删除 SQLite 后可从 Markdown 重建可搜索索引 |
+| P3 | 进行中（合同已冻结） | 历史、Markdown、FTS5、索引重建 | P2 | 删除 SQLite 后可从 Markdown 重建可搜索索引 |
 | P4 | 计划 | STDIO MCP Bridge 和四客户端 | P1-P3 | 七工具合同测试通过，多客户端不重复执行 |
 | P5 | 计划 | WebUI MCP 自动配置与真实握手 | P4 | 配置可备份、合并、验证和恢复 |
-| P6 | 进行中 | 可插拔 ASR、Lite/Standard 分层、Model Manager、多语言回退 | P2 | 中文用户可按需安装小模型首体验并显式升级；中国下载可恢复且校验；各层默认模型通过对应基准门禁 |
+| P6 | 完成 | 可插拔 ASR、Lite/Standard 分层、Model Manager、多语言回退 | P2 | 中文用户可按需安装小模型首体验并显式升级；中国下载可恢复且校验；各层默认模型通过对应基准门禁（Standard 过审为正式默认，Lite 未过审不自动推荐） |
 | P7 | 计划 | Windows 安装器和 GitHub Release | P1-P6 | 干净 Windows 环境可安装、升级、卸载 |
 | P8 | 计划 | 公开测试和 Harness 加固 | P7 | 关键失败模式有自动化护栏与审计记录 |
 

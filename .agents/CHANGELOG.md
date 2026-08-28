@@ -4,6 +4,10 @@
 
 ### Added
 
+- ASR-4 基准门禁与默认模型审批：`asr/release_gate.py` 冻结阈值 v1（按 tier 语言范围裁剪、零样本 fail-closed、静音幻觉率门禁）+ `asr/benchmark` 扩展（real sherpa tiers 经生产注册链路、CER/WER 双归一化、实体召回、RTF、峰值内存、`--gate` 退出码）+ `scripts/build_benchmark_corpus.py` TTS 语料 v1（SAPI 原生合成 + numpy 重采样/混噪/混乐，语料不入库、逐文件钉 SHA）。真实执行：Standard 全项 PASS 审批为正式默认；Lite 实体召回 0.50 未过审。`asr/approvals.py` 精确 `(model_id, version)` 审批注册表接入 ModelManagerService/路由 handlers/WebUI 标签；证据 `docs/ASR_RELEASE_GATE.md` + `benchmarks/results/`。
+- ASR-4 打包矩阵与发布验证：生产入口 `evoblue_video_mcp/__main__.py`（loopback uvicorn、production token 首启生成并持久化到数据目录、WebUI 静态挂载且 API 优先）；PyInstaller onedir 双变体 spec + `scripts/build_package.py`（base 47.4 MB / full 120.9 MB，ASR 运行时增量 73.5 MB 实测，模型权重永不入包）；CI `package` workflow（Windows base+full / macOS / Linux，仅产物上传）；`scripts/verify_release.py` 八项打包链路验证（干净档案、审批标志、token 401/200、损坏模型隔离）全过；`docs/RELEASE_VERIFICATION.md` 人工清单（含中国大陆网络 profile）与 `docs/MIGRATION_ROLLBACK.md`（v1–v7 + 备份回滚演练）；`THIRD_PARTY_NOTICES.md` 升级为锁定依赖清单并随包分发。
+
+- P3 四合同冻结（实现待开工）：`docs/MARKDOWN_SCHEMA.md` 升级为 v1.0 冻结版（frontmatter 字段表 + 段落解析锚点 + `analysis_id ≡ job_id`）；新增 `docs/HISTORY_SEARCH_API.md`（历史/搜索/索引管理端点 + 结构化错误信封 + P4 MCP 映射）；新增 `docs/FTS5_SCHEMA.md`（迁移 v8 逐字符 DDL、自带文本 FTS5 表、CJK 单字切分查询合同）；新增 `docs/INDEX_REBUILD.md`（唯一重扫算法、隔离诊断码、幂等崩溃恢复、验收标准）；`docs/adr/0003` 记录决策。`scripts/verify_p3_contract.py` 从文档原文提取 DDL 执行，12 项检查全过。
 - Silero VAD 改为受管依赖随基础包分发（`asr/assets/` + `asr/vad.py` 钉 SHA 校验）：识别归档不含 VAD，注册前 fail-closed 校验，缺失/损坏时阻止 Provider 注册而不是转写中途失败；`docs/ASR_MODEL_LICENSES.md` 补 VAD 钉 SHA 与打包决策。
 - Silero VAD 完整 MIT 许可文本随包分发（`asr/assets/silero_vad.LICENSE`）并全文录入 `THIRD_PARTY_NOTICES.md`；修正 `docs/ASR_MODEL_LICENSES.md` 中「基础安装包不包含任何模型权重」的旧表述（现为仅随包附带 VAD）。
 - ASR-3 release hardening：统一 `reconcile_waiting_asr_jobs()`（双门禁：SQLite 安装记录 + Provider 注册），接入 Engine 启动、安装完成与保存 whisper CLI 路径三个恢复触发点，消除安装提交后崩溃与 CLI 后配置导致的 `waiting_for_model` 永久等待；文件门禁 Provider 注册抽至 `asr/registration.py`。
