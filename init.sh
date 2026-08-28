@@ -3,6 +3,7 @@ set -e
 
 required_files=(
   "AGENTS.md"
+  "Codex.me"
   ".agents/feature_list.json"
   ".agents/progress.md"
   ".agents/CHANGELOG.md"
@@ -36,7 +37,7 @@ check_tool "Git" git --version
 echo
 echo "Start work:"
 echo "  1. Read AGENTS.md."
-echo "  2. Read .agents/progress.md and relevant feature/contracts."
+echo "  2. Read Codex.me, .agents/progress.md, and relevant feature/contracts."
 echo "  3. Make the smallest contract-aligned change."
 echo "  4. Run tests, lint, type checks, and build as applicable."
 echo
@@ -45,4 +46,3 @@ echo "  1. Update .agents/feature_list.json and .agents/progress.md."
 echo "  2. Record reproducible lessons in .agents/experience.md."
 echo "  3. Update .agents/CHANGELOG.md for meaningful changes."
 echo "  4. Update AGENTS.md only when rules or architecture change."
-

@@ -11,6 +11,8 @@ from fastapi import FastAPI
 from platformdirs import user_data_path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evoblue_video_mcp.asr.registration import register_available_asr_providers
+from evoblue_video_mcp.asr.service import ModelManagerService, reconcile_waiting_asr_jobs
 from evoblue_video_mcp.config import CredentialStore, KeyringCredentialStore, Settings
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.llm.http import HttpLLMProvider
@@ -58,9 +60,15 @@ def resolve_runtime_paths(settings: Settings) -> RuntimePaths:
 class ProductionHandlerFactory:
     """Build handlers from the latest non-secret settings and keyring secret."""
 
-    def __init__(self, paths: RuntimePaths, credentials: CredentialStore) -> None:
+    def __init__(
+        self,
+        paths: RuntimePaths,
+        credentials: CredentialStore,
+        models_dir: Path | None = None,
+    ) -> None:
         self._paths = paths
         self._credentials = credentials
+        self._models_dir = models_dir or paths.data / "models"
 
     async def __call__(
         self, settings: AppSettings | None
@@ -74,6 +82,9 @@ class ProductionHandlerFactory:
             or not settings.llm_credential_ref
         ):
             return None
+        register_available_asr_providers(
+            self._models_dir, settings.whisper_cpp_executable
+        )
         try:
             api_key = await asyncio.to_thread(
                 self._credentials.get_secret, settings.llm_credential_ref
@@ -93,6 +104,7 @@ class ProductionHandlerFactory:
                 api_key=api_key,
                 model=settings.llm_model,
             ),
+            asr_provider_id=settings.asr_provider or "auto",
         )
 
 
@@ -136,16 +148,27 @@ def create_runtime_app(
     runtime_settings = settings or Settings()
     paths = resolve_runtime_paths(runtime_settings)
     paths.data.mkdir(parents=True, exist_ok=True)
+    model_dir = runtime_settings.asr_model_dir or paths.data / "models"
+    register_available_asr_providers(model_dir)
     engine = build_engine(paths.database)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     credentials = credential_store or KeyringCredentialStore()
-    handlers = handler_factory or ProductionHandlerFactory(paths, credentials)
+    handlers = handler_factory or ProductionHandlerFactory(paths, credentials, Path(model_dir))
+    model_service = ModelManagerService(models_dir=model_dir, session_factory=session_factory)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         del app
         await init_db(engine)
+        await model_service.cleanup_trash()
         await recover_on_startup(session_factory, now=time.time())
+        # A previous run may have crashed between committing a model install and
+        # resuming its waiting jobs; re-account them now that migrations and
+        # provider registration are done.
+        async with session_factory() as session:
+            await reconcile_waiting_asr_jobs(
+                session, models_dir=model_dir, now=time.time()
+            )
         stop = asyncio.Event()
         worker = asyncio.create_task(
             run_runtime_worker_loop(
@@ -164,11 +187,13 @@ def create_runtime_app(
             worker.cancel()
             with suppress(asyncio.CancelledError):
                 await worker
+            await model_service.close()
             await engine.dispose()
 
     return create_app(
         runtime_settings,
         session_factory=session_factory,
         credential_store=credentials,
+        model_service=model_service,
         lifespan=lifespan,
     )

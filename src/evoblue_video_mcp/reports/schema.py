@@ -20,6 +20,9 @@ class ReportDocument(BaseModel):
     analyzed_at: datetime
     summary_mode: Literal["auto", "standard", "unboxing"]
     language: str = ""
+    asr_provider: str = ""
+    asr_model: str = ""
+    asr_model_version: str = ""
     tags: list[str] = Field(default_factory=list)
     core_summary: str = ""
     key_takeaways: list[str] = Field(default_factory=list)
@@ -28,4 +31,3 @@ class ReportDocument(BaseModel):
     comment_sentiment: str = ""
     video_information: str = ""
     transcript: str | None = None
-

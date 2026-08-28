@@ -1,0 +1,18 @@
+{
+  "name": "evoblue-asr-smoke",
+  "version": "1",
+  "samples": [
+    {
+      "id": "zh-studio-001",
+      "description": "Mandarin studio speech",
+      "language": "zh",
+      "reference_text": "大家好，欢迎收看本期节目。"
+    },
+    {
+      "id": "en-interview-001",
+      "description": "English interview",
+      "language": "en",
+      "reference_text": "Welcome to the show today."
+    }
+  ]
+}

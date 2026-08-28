@@ -7,11 +7,13 @@ from evoblue_video_mcp.reports.writer import ReportWriter
 from evoblue_video_mcp.runtime.handlers import (
     ChunkingHandler,
     CleaningTranscriptHandler,
+    DownloadingAudioHandler,
     FetchingMetadataHandler,
     FetchingSubtitlesHandler,
     GeneratingReportHandler,
     IndexingHandler,
     SummarizingChunksHandler,
+    TranscribingHandler,
 )
 from evoblue_video_mcp.runtime.worker import StageHandler
 from evoblue_video_mcp.storage.artifact_store import ArtifactStore
@@ -23,11 +25,14 @@ def build_handlers(
     artifact_store: ArtifactStore,
     report_writer: ReportWriter,
     llm: LLMProvider,
+    asr_provider_id: str = "auto",
 ) -> dict[JobStatus, StageHandler]:
-    """Assemble the full P2 pipeline handler set."""
+    """Assemble the full P2/ASR pipeline handler set."""
     return {
         JobStatus.FETCHING_METADATA: FetchingMetadataHandler(adapter),
         JobStatus.FETCHING_SUBTITLES: FetchingSubtitlesHandler(adapter, artifact_store),
+        JobStatus.DOWNLOADING_AUDIO: DownloadingAudioHandler(adapter, artifact_store),
+        JobStatus.TRANSCRIBING: TranscribingHandler(artifact_store, asr_provider_id),
         JobStatus.CLEANING_TRANSCRIPT: CleaningTranscriptHandler(artifact_store),
         JobStatus.CHUNKING: ChunkingHandler(artifact_store),
         JobStatus.SUMMARIZING_CHUNKS: SummarizingChunksHandler(artifact_store, llm),

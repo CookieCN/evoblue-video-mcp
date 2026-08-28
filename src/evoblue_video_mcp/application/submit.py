@@ -27,9 +27,13 @@ def compute_request_fingerprint(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def compute_config_fingerprint(*, provider: str, model: str, base_url: str = "") -> str:
+def compute_config_fingerprint(
+    *, provider: str, model: str, base_url: str = "", asr_provider: str = "auto"
+) -> str:
     """Derive a fingerprint from LLM configuration that affects report output."""
-    material = f"pipeline-v1|report-v1|chunks-4000|{provider}|{base_url}|{model}"
+    material = (
+        f"pipeline-v1|report-v1|chunks-4000|{provider}|{base_url}|{model}|{asr_provider}"
+    )
     return hashlib.sha256(material.encode()).hexdigest()
 
 

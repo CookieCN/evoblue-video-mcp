@@ -6,13 +6,27 @@ owner, and lease expiry, so a SQLite single-writer serializes concurrent access:
 at most one worker wins a claim, and only the current lease holder may advance it.
 """
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from evoblue_video_mcp.jobs.states import TERMINAL_JOB_STATUSES, JobStatus
 from evoblue_video_mcp.jobs.transitions import RUNNING_STATES, validate_transition
-from evoblue_video_mcp.storage.models import AppSettings, Job, JobArtifact
+from evoblue_video_mcp.storage.model_download import (
+    ACTIVE_DOWNLOAD_STATUSES,
+    ModelDownloadStatus,
+)
+from evoblue_video_mcp.storage.model_download import (
+    validate_transition as validate_download_transition,
+)
+from evoblue_video_mcp.storage.models import (
+    ActiveModel,
+    AppSettings,
+    Job,
+    JobArtifact,
+    ModelDownload,
+    ModelInstall,
+)
 
 _TERMINAL_VALUES = [state.value for state in TERMINAL_JOB_STATUSES]
 _RUNNING_VALUES = [state.value for state in RUNNING_STATES]
@@ -22,6 +36,10 @@ MAX_ATTEMPTS_EXCEEDED = "MAX_ATTEMPTS_EXCEEDED"
 
 class LeaseLostError(RuntimeError):
     """Raised when a worker advances a job whose lease it no longer holds."""
+
+
+class StaleRevisionError(RuntimeError):
+    """Raised when a download operation is advanced with an outdated revision."""
 
 
 async def _get(session: AsyncSession, job_id: str) -> Job | None:
@@ -240,7 +258,7 @@ async def advance_job(
         "retryable": False,
         "updated_at": now,
     }
-    if to_status in TERMINAL_JOB_STATUSES:
+    if to_status in TERMINAL_JOB_STATUSES or to_status is JobStatus.WAITING_FOR_MODEL:
         # Reaching a terminal state releases the lease; the job is no longer owned.
         advance_values["lease_owner"] = None
         advance_values["lease_expires_at"] = None
@@ -379,6 +397,87 @@ async def get_app_settings(session: AsyncSession) -> AppSettings | None:
     return (await session.scalars(select(AppSettings).where(AppSettings.id == 1))).first()
 
 
+async def pin_job_asr_route(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    owner: str,
+    now: float,
+    provider_id: str,
+    model_id: str,
+    model_version: str,
+    recommendation_model_id: str | None,
+) -> Job:
+    """Persist the selected ASR identity under the current worker lease."""
+    job = await _get(session, job_id)
+    if job is None:
+        raise KeyError(f"No job with id {job_id!r}")
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == JobStatus.TRANSCRIBING.value,
+            Job.lease_owner == owner,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
+        )
+        .values(
+            asr_provider_id=provider_id,
+            asr_model_id=model_id,
+            asr_model_version=model_version,
+            asr_recommendation_model_id=recommendation_model_id,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise LeaseLostError(f"Lease lost while pinning ASR route for job {job_id!r}")
+    await session.commit()
+    return await _get_required(session, job_id)
+
+
+async def list_waiting_model_ids(session: AsyncSession) -> list[str]:
+    """Return the distinct recommendation model ids of jobs parked for a model."""
+    result = await session.execute(
+        select(Job.asr_recommendation_model_id)
+        .where(
+            Job.status == JobStatus.WAITING_FOR_MODEL.value,
+            Job.asr_recommendation_model_id.is_not(None),
+        )
+        .distinct()
+    )
+    return [model_id for model_id in result.scalars().all() if model_id is not None]
+
+
+async def resume_waiting_jobs(
+    session: AsyncSession, *, model_id: str, now: float
+) -> list[str]:
+    """Resume jobs waiting for an explicitly installed model."""
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.status == JobStatus.WAITING_FOR_MODEL.value,
+            Job.asr_recommendation_model_id == model_id,
+        )
+        .values(
+            status=JobStatus.TRANSCRIBING.value,
+            stage=JobStatus.TRANSCRIBING.value,
+            asr_recommendation_model_id=None,
+            error_code=None,
+            error_detail=None,
+            retryable=False,
+            lease_owner=None,
+            lease_expires_at=None,
+            updated_at=now,
+        )
+        .returning(Job.job_id)
+    )
+    job_ids = list(result.scalars().all())
+    await session.commit()
+    return job_ids
+
+
 async def save_app_settings(
     session: AsyncSession,
     *,
@@ -389,6 +488,8 @@ async def save_app_settings(
     llm_base_url: str | None = None,
     llm_model: str | None = None,
     llm_credential_ref: str | None = None,
+    asr_provider: str | None = None,
+    whisper_cpp_executable: str | None = None,
 ) -> AppSettings:
     """Persist the single app-settings row (upsert); ``None`` fields clear the value."""
     settings = await get_app_settings(session)
@@ -402,6 +503,8 @@ async def save_app_settings(
     settings.llm_base_url = llm_base_url
     settings.llm_model = llm_model
     settings.llm_credential_ref = llm_credential_ref
+    settings.asr_provider = asr_provider
+    settings.whisper_cpp_executable = whisper_cpp_executable
     settings.updated_at = now
 
     await session.commit()
@@ -658,7 +761,7 @@ async def request_cancellation(session: AsyncSession, *, job_id: str, now: float
         return job
 
     values: dict[str, object] = {"cancel_requested_at": now, "updated_at": now}
-    if status in {JobStatus.QUEUED, JobStatus.RETRY_WAIT}:
+    if status in {JobStatus.QUEUED, JobStatus.RETRY_WAIT, JobStatus.WAITING_FOR_MODEL}:
         values.update(
             status=JobStatus.CANCELLED.value,
             error_code="CANCELLED_BY_USER",
@@ -679,3 +782,475 @@ async def request_cancellation(session: AsyncSession, *, job_id: str, now: float
         return await _get(session, job_id)
     await session.commit()
     return await _get_required(session, job_id)
+
+
+async def get_active_model(session: AsyncSession, *, model_id: str) -> ActiveModel | None:
+    """Return the active-version pointer for a model, or ``None``."""
+    return (
+        await session.scalars(select(ActiveModel).where(ActiveModel.model_id == model_id))
+    ).first()
+
+
+async def activate_installation(
+    session: AsyncSession, *, model_id: str, version: str, now: float
+) -> ActiveModel:
+    """Activate an installed version; fails without touching active if not installed."""
+    install = await get_installation(session, model_id=model_id, version=version)
+    if install is None:
+        raise KeyError(f"cannot activate {model_id!r}/{version!r}: not installed")
+    active = await get_active_model(session, model_id=model_id)
+    if active is None:
+        active = ActiveModel(model_id=model_id, active_version=version, updated_at=now)
+        session.add(active)
+    active.active_version = version
+    active.updated_at = now
+    await session.commit()
+    result = await get_active_model(session, model_id=model_id)
+    if result is None:
+        raise RuntimeError(f"active model {model_id!r} vanished after write")
+    return result
+
+
+async def complete_installation(
+    session: AsyncSession,
+    *,
+    operation_id: str,
+    model_id: str,
+    version: str,
+    installed_path: str,
+    now: float,
+) -> ModelDownload:
+    """Record + activate the install and complete the operation in one transaction.
+
+    All three effects commit together, so a failure (including a concurrent
+    revision bump on the operation) rolls back and leaves the previous active
+    version untouched.
+    """
+    operation = await get_download_operation(session, operation_id=operation_id)
+    if operation is None:
+        raise KeyError(f"No download operation with id {operation_id!r}")
+    if operation.model_id != model_id or operation.version != version:
+        raise ValueError(
+            f"operation {operation_id!r} is for {operation.model_id!r}/{operation.version!r}, "
+            f"not {model_id!r}/{version!r}"
+        )
+    validate_download_transition(
+        ModelDownloadStatus(operation.status), ModelDownloadStatus.COMPLETED
+    )
+
+    install = await get_installation(session, model_id=model_id, version=version)
+    if install is None:
+        install = ModelInstall(
+            model_id=model_id, version=version, installed_path=installed_path, installed_at=now
+        )
+        session.add(install)
+    install.installed_path = installed_path
+    install.installed_at = now
+
+    active = await get_active_model(session, model_id=model_id)
+    if active is None:
+        active = ActiveModel(model_id=model_id, active_version=version, updated_at=now)
+        session.add(active)
+    active.active_version = version
+    active.updated_at = now
+
+    result = await session.execute(
+        update(ModelDownload)
+        .where(
+            ModelDownload.operation_id == operation_id,
+            ModelDownload.revision == operation.revision,
+        )
+        .values(
+            status=ModelDownloadStatus.COMPLETED.value,
+            revision=operation.revision + 1,
+            error_code=None,
+            error_detail=None,
+            updated_at=now,
+        )
+        .returning(ModelDownload.operation_id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise StaleRevisionError(
+            f"download operation {operation_id!r} was updated concurrently"
+        )
+    await session.commit()
+    updated = await get_download_operation(session, operation_id=operation_id)
+    if updated is None:
+        raise RuntimeError(f"download operation {operation_id!r} vanished after write")
+    return updated
+
+
+async def get_installation(
+    session: AsyncSession, *, model_id: str, version: str
+) -> ModelInstall | None:
+    """Return one installed model version, or ``None``."""
+    return (
+        await session.scalars(
+            select(ModelInstall).where(
+                ModelInstall.model_id == model_id, ModelInstall.version == version
+            )
+        )
+    ).first()
+
+
+async def get_installations(
+    session: AsyncSession, *, model_id: str | None = None
+) -> list[ModelInstall]:
+    """Return installed versions, optionally limited to one model.
+
+    Used by uninstall trash reconciliation: a leftover trash entry whose model
+    still has an install record must be restored rather than deleted.
+    """
+    statement = select(ModelInstall)
+    if model_id is not None:
+        statement = statement.where(ModelInstall.model_id == model_id)
+    return list((await session.scalars(statement)).all())
+
+
+async def save_installation(
+    session: AsyncSession, *, model_id: str, version: str, installed_path: str, now: float
+) -> ModelInstall:
+    """Record an installed model version; idempotent for the same (model, version)."""
+    install = await get_installation(session, model_id=model_id, version=version)
+    if install is None:
+        install = ModelInstall(
+            model_id=model_id,
+            version=version,
+            installed_path=installed_path,
+            installed_at=now,
+        )
+        session.add(install)
+    install.installed_path = installed_path
+    install.installed_at = now
+    await session.commit()
+    result = await get_installation(session, model_id=model_id, version=version)
+    if result is None:
+        raise RuntimeError(f"installation {model_id!r}/{version!r} vanished after write")
+    return result
+
+
+async def create_download_operation(
+    session: AsyncSession,
+    *,
+    operation_id: str,
+    model_id: str,
+    version: str,
+    source_url: str,
+    source_kind: str,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    now: float,
+    etag: str | None = None,
+    last_modified: str | None = None,
+) -> ModelDownload:
+    """Create a download operation in ``pending`` state.
+
+    ``etag``/``last_modified`` may carry validators inherited from a prior attempt
+    for the same (model, version), so a resume can send ``If-Range`` immediately.
+    """
+    operation = ModelDownload(
+        operation_id=operation_id,
+        model_id=model_id,
+        version=version,
+        source_url=source_url,
+        source_kind=source_kind,
+        expected_sha256=expected_sha256,
+        expected_size_bytes=expected_size_bytes,
+        downloaded_bytes=0,
+        etag=etag,
+        last_modified=last_modified,
+        status=ModelDownloadStatus.PENDING.value,
+        revision=0,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(operation)
+    await session.commit()
+    result = await get_download_operation(session, operation_id=operation_id)
+    if result is None:
+        raise RuntimeError(f"download operation {operation_id!r} vanished after write")
+    return result
+
+
+async def find_latest_download_operation(
+    session: AsyncSession, *, model_id: str, version: str
+) -> ModelDownload | None:
+    """Return the most recent download operation for a (model, version), or ``None``."""
+    return (
+        await session.scalars(
+            select(ModelDownload)
+            .where(ModelDownload.model_id == model_id, ModelDownload.version == version)
+            .order_by(ModelDownload.created_at.desc(), ModelDownload.revision.desc())
+            .limit(1)
+        )
+    ).first()
+
+
+async def get_download_operation(
+    session: AsyncSession, *, operation_id: str
+) -> ModelDownload | None:
+    """Return one download operation, or ``None``."""
+    return (
+        await session.scalars(
+            select(ModelDownload).where(ModelDownload.operation_id == operation_id)
+        )
+    ).first()
+
+
+async def find_active_download_operation(
+    session: AsyncSession, *, model_id: str
+) -> ModelDownload | None:
+    """Return the single non-terminal download operation for a model, or ``None``."""
+    active_values = [status.value for status in ACTIVE_DOWNLOAD_STATUSES]
+    return (
+        await session.scalars(
+            select(ModelDownload).where(
+                ModelDownload.model_id == model_id,
+                ModelDownload.status.in_(active_values),
+            )
+        )
+    ).first()
+
+
+async def restart_download(
+    session: AsyncSession, *, operation_id: str, now: float
+) -> ModelDownload:
+    """Zero the byte count and validators so a fresh download restarts safely.
+
+    Only allowed while ``pending`` or ``downloading``. Used when the on-disk
+    partial is inconsistent with the recorded progress, or when the server
+    ignored a Range request and the resource is being rewritten from zero.
+    """
+    operation = await get_download_operation(session, operation_id=operation_id)
+    if operation is None:
+        raise KeyError(f"No download operation with id {operation_id!r}")
+    if operation.status not in {
+        ModelDownloadStatus.PENDING.value,
+        ModelDownloadStatus.DOWNLOADING.value,
+    }:
+        raise ValueError("restart is only allowed while pending or downloading")
+    result = await session.execute(
+        update(ModelDownload)
+        .where(
+            ModelDownload.operation_id == operation_id,
+            ModelDownload.revision == operation.revision,
+        )
+        .values(
+            downloaded_bytes=0,
+            etag=None,
+            last_modified=None,
+            revision=operation.revision + 1,
+            updated_at=now,
+        )
+        .returning(ModelDownload.operation_id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise StaleRevisionError(
+            f"download operation {operation_id!r} was updated concurrently"
+        )
+    await session.commit()
+    updated = await get_download_operation(session, operation_id=operation_id)
+    if updated is None:
+        raise RuntimeError(f"download operation {operation_id!r} vanished after write")
+    return updated
+
+
+async def advance_download_operation(
+    session: AsyncSession,
+    *,
+    operation_id: str,
+    to_status: ModelDownloadStatus,
+    now: float,
+    temp_path: str | None = None,
+    etag: str | None = None,
+    last_modified: str | None = None,
+    error_code: str | None = None,
+    error_detail: str | None = None,
+    expected_revision: int | None = None,
+) -> ModelDownload:
+    """Transition a download operation with an optimistic revision check.
+
+    Byte-count changes go through ``update_download_progress`` only; entering
+    ``verifying`` requires the download to be complete.
+    """
+    operation = await get_download_operation(session, operation_id=operation_id)
+    if operation is None:
+        raise KeyError(f"No download operation with id {operation_id!r}")
+    validate_download_transition(ModelDownloadStatus(operation.status), to_status)
+    if (
+        to_status == ModelDownloadStatus.VERIFYING
+        and operation.downloaded_bytes != operation.expected_size_bytes
+    ):
+        raise ValueError("cannot enter verifying before the download is complete")
+    revision = operation.revision if expected_revision is None else expected_revision
+
+    values: dict[str, object] = {
+        "status": to_status.value,
+        "revision": revision + 1,
+        "updated_at": now,
+    }
+    if temp_path is not None:
+        values["temp_path"] = temp_path
+    if etag is not None:
+        values["etag"] = etag
+    if last_modified is not None:
+        values["last_modified"] = last_modified
+    if error_code is not None:
+        values["error_code"] = error_code
+    if error_detail is not None:
+        values["error_detail"] = error_detail
+
+    result = await session.execute(
+        update(ModelDownload)
+        .where(
+            ModelDownload.operation_id == operation_id,
+            ModelDownload.revision == revision,
+        )
+        .values(values)
+        .returning(ModelDownload.operation_id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise StaleRevisionError(
+            f"download operation {operation_id!r} was updated concurrently"
+        )
+    await session.commit()
+    updated = await get_download_operation(session, operation_id=operation_id)
+    if updated is None:
+        raise RuntimeError(f"download operation {operation_id!r} vanished after write")
+    return updated
+
+
+async def update_download_progress(
+    session: AsyncSession,
+    *,
+    operation_id: str,
+    downloaded_bytes: int,
+    now: float,
+    temp_path: str | None = None,
+    etag: str | None = None,
+    last_modified: str | None = None,
+    expected_revision: int | None = None,
+) -> ModelDownload:
+    """Persist download progress bytes with monotonic, bounded, revision-CAS updates.
+
+    Only allowed while ``downloading``; never changes source/SHA/status/operation.
+    """
+    operation = await get_download_operation(session, operation_id=operation_id)
+    if operation is None:
+        raise KeyError(f"No download operation with id {operation_id!r}")
+    if operation.status != ModelDownloadStatus.DOWNLOADING.value:
+        raise ValueError("progress may only be updated while downloading")
+    if downloaded_bytes < operation.downloaded_bytes:
+        raise ValueError("downloaded_bytes must not decrease")
+    if not 0 <= downloaded_bytes <= operation.expected_size_bytes:
+        raise ValueError("downloaded_bytes out of range")
+    revision = operation.revision if expected_revision is None else expected_revision
+
+    values: dict[str, object] = {
+        "downloaded_bytes": downloaded_bytes,
+        "revision": revision + 1,
+        "updated_at": now,
+    }
+    if temp_path is not None:
+        values["temp_path"] = temp_path
+    if etag is not None:
+        values["etag"] = etag
+    if last_modified is not None:
+        values["last_modified"] = last_modified
+
+    result = await session.execute(
+        update(ModelDownload)
+        .where(
+            ModelDownload.operation_id == operation_id,
+            ModelDownload.revision == revision,
+        )
+        .values(values)
+        .returning(ModelDownload.operation_id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise StaleRevisionError(
+            f"download operation {operation_id!r} was updated concurrently"
+        )
+    await session.commit()
+    updated = await get_download_operation(session, operation_id=operation_id)
+    if updated is None:
+        raise RuntimeError(f"download operation {operation_id!r} vanished after write")
+    return updated
+
+
+async def switch_download_source(
+    session: AsyncSession,
+    *,
+    operation_id: str,
+    source_url: str,
+    source_kind: str,
+    now: float,
+) -> ModelDownload:
+    """Point an in-flight download at the next source, restarting from zero.
+
+    A failed source may have left a corrupt byte prefix; without per-chunk hashes a
+    cross-source resume is unsafe, so the byte count and source-specific validators
+    are reset and the caller must truncate the on-disk partial before retrying.
+    Allowed only while ``pending`` or ``downloading``.
+    """
+    operation = await get_download_operation(session, operation_id=operation_id)
+    if operation is None:
+        raise KeyError(f"No download operation with id {operation_id!r}")
+    if operation.status not in {
+        ModelDownloadStatus.PENDING.value,
+        ModelDownloadStatus.DOWNLOADING.value,
+    }:
+        raise ValueError("source may only be switched while pending or downloading")
+    result = await session.execute(
+        update(ModelDownload)
+        .where(
+            ModelDownload.operation_id == operation_id,
+            ModelDownload.revision == operation.revision,
+        )
+        .values(
+            source_url=source_url,
+            source_kind=source_kind,
+            downloaded_bytes=0,
+            etag=None,
+            last_modified=None,
+            revision=operation.revision + 1,
+            updated_at=now,
+        )
+        .returning(ModelDownload.operation_id)
+    )
+    if result.scalar_one_or_none() is None:
+        await session.rollback()
+        raise StaleRevisionError(
+            f"download operation {operation_id!r} was updated concurrently"
+        )
+    await session.commit()
+    updated = await get_download_operation(session, operation_id=operation_id)
+    if updated is None:
+        raise RuntimeError(f"download operation {operation_id!r} vanished after write")
+    return updated
+
+
+async def uninstall_model(session: AsyncSession, *, model_id: str) -> list[str]:
+    """Delete every install/active/download record for a model, returning removed install paths.
+
+    The caller owns filesystem removal and reclaimable-space reporting; this only
+    clears persisted state atomically so a crash cannot leave orphaned DB rows
+    without directories or the reverse.
+    """
+    installs = list(
+        (
+            await session.scalars(
+                select(ModelInstall).where(ModelInstall.model_id == model_id)
+            )
+        ).all()
+    )
+    paths = [install.installed_path for install in installs]
+    await session.execute(delete(ModelInstall).where(ModelInstall.model_id == model_id))
+    await session.execute(delete(ActiveModel).where(ActiveModel.model_id == model_id))
+    await session.execute(delete(ModelDownload).where(ModelDownload.model_id == model_id))
+    await session.commit()
+    return paths

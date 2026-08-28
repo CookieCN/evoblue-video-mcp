@@ -1,0 +1,45 @@
+# EvoBlue Video MCP — Project Handoff
+
+## Purpose
+
+把 YouTube、Bilibili 等视频链接转换为用户拥有的标准 Markdown 知识资产。系统本机提取元数据和字幕，无字幕时可选本地 ASR，再由 LLM 总结、分析、保存和检索。
+
+## Product boundaries
+
+- Local-first：Local Engine 是唯一状态所有者，不建设远程业务服务器、账户、支付、多租户或云同步。
+- Markdown 是最终事实资产，SQLite 索引可从 Markdown 重建。
+- STDIO MCP Bridge 只调用 `127.0.0.1` Engine，不直接执行下载、ASR、FFmpeg 或数据库逻辑。
+- 普通用户通过 WebUI 完成首次设置，不需要手改配置文件。
+
+## Current progress
+
+- P0 已完成：Harness、产品/架构合同、MCP/Job/Markdown/WebUI 合同、前后端骨架和基础 CI。
+- P1/P2 已完成：SQLite Job、版本化迁移、状态转换、单 Worker 租约、崩溃恢复、Worker 循环、Engine 启动恢复、WebUI 后端 API 与前端骨架，以及 YouTube/Bilibili 字幕分析闭环。
+- P6/ASR：ASR-0～ASR-3 已完成。Lite/Standard/Whisper 分层路由、`waiting_for_model`、显式安装建议、安装后恢复与 Markdown ASR 身份已接通；下一步是 ASR-4 打包、基准、许可证和发布加固。
+- 详细状态以 `.agents/progress.md` 和 `.agents/feature_list.json` 为准。
+
+## ASR direction
+
+- 平台字幕优先；只有缺少可用字幕时才进入 ASR。
+- 基础安装包不携带 ASR 模型。
+- 中文模型分两级：约 63.4 MB 的离线 Zipformer CTC small INT8 是 Lite 首体验候选；约 228 MB 的 INT8-only SenseVoiceSmall 是 Standard 候选。两者只有通过对应基准、许可证审查和中国下载验证后才能成为正式推荐。
+- 禁止使用同时携带约 894 MB FP32 与约 228 MB INT8 的 SenseVoice 完整制品；生产 Manifest 只能安装实际需要的权重。
+- 其他语言由可选 `whisper.cpp` 模型包回退；faster-whisper 仅保留为高级可选能力，不得拖大基础安装包。
+- ASR 路由不触发隐式下载：缺模型任务持久化为 `waiting_for_model`，WebUI 经用户同意安装后由正常 Worker 恢复。应用设置可固定 Provider；已固定路由写入 Job，升级不会改写既有任务选择。
+- `whisper-cpp-base` 钉死 147,951,465-byte ggml Base 制品；模型由 Model Manager 管理，`whisper-cli` 由用户显式配置，基础安装包不携带二进制。
+- Model Manager 由 Local Engine 统一负责按需下载、断点续传、SHA-256、安全解压、原子安装、升级回滚和卸载。
+- 模型许可按精确制品审查：SenseVoice 使用 FunASR Model License 1.1；Zipformer 转换归档的再分发声明待确认。未经审批的权重或镜像不得进入生产 Manifest。
+- Windows 必须在导入 sherpa 前优先注册 ASR 环境的 `onnxruntime/capi` DLL 目录，避免误载 System32 ONNX Runtime 1.10；`version [27] ... only 1 to 10` 是 C API DLL 冲突，不是模型版本。
+- 完整执行合同与 ASR-0～ASR-4 验收标准见 `docs/ASR_PLAN.md`。
+
+## Development rules
+
+- 开工顺序：`AGENTS.md` → `.agents/progress.md` → `.agents/feature_list.json` → 相关 `docs/` 合同。
+- 先改合同和测试，再实现核心逻辑；修改后运行与风险相称的 test/lint/build。
+- 密钥、token、密码不得进入源码、`.env`、日志、快照或 Markdown 报告。
+- 不自动 git push，不自动部署，不启动长期运行服务。
+- 收工同步 feature list、progress、experience、CHANGELOG 和必要的 AGENTS 架构规则。
+
+## Known environment gotcha
+
+Git 可能因沙箱账户与仓库 Owner 不同报告 dubious ownership，只对单次 Git 命令使用 `git -c safe.directory=...`。如果 Windows sandbox 报 `setup refresh had errors`，先查 `~/.codex/.sandbox/sandbox.YYYY-MM-DD.log`；本项目曾因 `.agents` Owner 被改为 `CodexSandboxOffline` 触发该故障，禁止用长期 Full Access 掩盖问题。

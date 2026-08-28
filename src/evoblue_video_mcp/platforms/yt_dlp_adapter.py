@@ -1,6 +1,9 @@
 """yt-dlp based adapter for YouTube and Bilibili metadata and subtitles."""
 
 import asyncio
+import os
+import subprocess
+import tempfile
 import urllib.error
 from typing import Any, cast
 
@@ -9,7 +12,10 @@ import yt_dlp  # type: ignore[import-untyped]
 import yt_dlp.utils  # type: ignore[import-untyped]
 
 from evoblue_video_mcp.platforms.base import (
+    AUDIO_DOWNLOAD_FAILED,
+    FFMPEG_MISSING,
     METADATA_FETCH_FAILED,
+    SUBTITLE_MISSING,
     SUBTITLE_UNAVAILABLE,
     AdapterError,
 )
@@ -69,7 +75,7 @@ class YtDlpAdapter:
         picked = self._pick_subtitle_url(info)
         if picked is None:
             raise AdapterError(
-                SUBTITLE_UNAVAILABLE, "no supported subtitles available", retryable=False
+                SUBTITLE_MISSING, "no supported subtitles available", retryable=False
             )
 
         url, ext, lang = picked
@@ -78,13 +84,53 @@ class YtDlpAdapter:
             segments = self._parse(raw, ext)
         except ValueError as exc:
             raise AdapterError(
-                SUBTITLE_UNAVAILABLE, f"subtitle format invalid: {exc}", retryable=False
+                SUBTITLE_MISSING, f"subtitle format invalid: {exc}", retryable=False
             ) from exc
         if not segments:
-            raise AdapterError(SUBTITLE_UNAVAILABLE, "subtitle text was empty", retryable=False)
+            raise AdapterError(SUBTITLE_MISSING, "subtitle text was empty", retryable=False)
         return Transcript(
             segments=segments, language=lang, source=f"{ref.platform.value}-subtitle"
         )
+
+    async def download_audio(self, ref: VideoRef, dest_path: str) -> None:
+        """Download the best audio stream and transcode it to 16 kHz mono WAV."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                source = await asyncio.to_thread(self._download_audio, ref, tmpdir)
+            except yt_dlp.utils.DownloadError as exc:
+                raise AdapterError(
+                    AUDIO_DOWNLOAD_FAILED,
+                    "audio download failed",
+                    retryable=_is_retryable_download_error(exc),
+                ) from exc
+            await asyncio.to_thread(self._transcode_wav, source, dest_path)
+
+    def _download_audio(self, ref: VideoRef, outdir: str) -> str:
+        opts = {
+            "quiet": True,
+            "format": "bestaudio/best",
+            "outtmpl": f"{outdir}/%(id)s.%(ext)s",
+            "noplaylist": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(ref.url, download=True)
+            return str(ydl.prepare_filename(info))
+
+    def _transcode_wav(self, source: str, dest: str) -> None:
+        tmp = f"{dest}.tmp"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", source, "-ac", "1", "-ar", "16000", "-f", "wav", tmp],
+                check=True,
+                capture_output=True,
+            )
+        except FileNotFoundError as exc:
+            raise AdapterError(FFMPEG_MISSING, "ffmpeg not found", retryable=False) from exc
+        except subprocess.CalledProcessError as exc:
+            raise AdapterError(
+                AUDIO_DOWNLOAD_FAILED, "audio transcode failed", retryable=False
+            ) from exc
+        os.replace(tmp, dest)
 
     def _extract_info(self, ref: VideoRef) -> dict[str, Any]:
         opts = {

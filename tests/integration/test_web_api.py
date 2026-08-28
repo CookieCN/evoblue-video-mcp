@@ -130,6 +130,33 @@ async def test_settings_roundtrip(
         assert resp.json()["report_directory"] == "C:/reports"
 
 
+async def test_settings_reject_unknown_asr_provider(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A bogus provider must be refused at the boundary: once persisted it would
+    # fail every ASR job that routes through the saved preference.
+    async with _client(session_factory) as client:
+        resp = await client.put(
+            "/api/settings", json={"asr_provider": "totally-real-asr"}
+        )
+    assert resp.status_code == 422
+
+
+async def test_settings_accept_known_asr_provider(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(session_factory) as client:
+        resp = await client.put(
+            "/api/settings", json={"asr_provider": "whisper-cpp-base"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["asr_provider"] == "whisper-cpp-base"
+
+        resp = await client.put("/api/settings", json={"asr_provider": "auto"})
+        assert resp.status_code == 200
+        assert resp.json()["asr_provider"] == "auto"
+
+
 async def test_settings_explicit_null_clears_field(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

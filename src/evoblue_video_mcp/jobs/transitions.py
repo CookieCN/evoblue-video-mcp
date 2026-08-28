@@ -11,6 +11,7 @@ class TransitionError(ValueError):
 RUNNING_STATES = frozenset(JobStatus) - TERMINAL_JOB_STATUSES - {
     JobStatus.QUEUED,
     JobStatus.RETRY_WAIT,
+    JobStatus.WAITING_FOR_MODEL,
 }
 
 _LINEAR_CHAIN: tuple[tuple[JobStatus, JobStatus], ...] = (
@@ -19,6 +20,8 @@ _LINEAR_CHAIN: tuple[tuple[JobStatus, JobStatus], ...] = (
     (JobStatus.FETCHING_SUBTITLES, JobStatus.DOWNLOADING_AUDIO),
     (JobStatus.FETCHING_SUBTITLES, JobStatus.CLEANING_TRANSCRIPT),
     (JobStatus.DOWNLOADING_AUDIO, JobStatus.TRANSCRIBING),
+    (JobStatus.TRANSCRIBING, JobStatus.WAITING_FOR_MODEL),
+    (JobStatus.WAITING_FOR_MODEL, JobStatus.TRANSCRIBING),
     (JobStatus.TRANSCRIBING, JobStatus.CLEANING_TRANSCRIPT),
     (JobStatus.CLEANING_TRANSCRIPT, JobStatus.CHUNKING),
     (JobStatus.CHUNKING, JobStatus.SUMMARIZING_CHUNKS),
@@ -42,6 +45,10 @@ def _build_allowed() -> dict[JobStatus, frozenset[JobStatus]]:
     # A queued job can be rejected (validation) or cancelled before it starts.
     allowed[JobStatus.QUEUED].add(JobStatus.FAILED)
     allowed[JobStatus.QUEUED].add(JobStatus.CANCELLED)
+
+    allowed[JobStatus.WAITING_FOR_MODEL].update(
+        {JobStatus.TRANSCRIBING, JobStatus.FAILED, JobStatus.CANCELLED}
+    )
 
     # retry_wait re-enters the stage it paused on, or terminates permanently.
     allowed[JobStatus.RETRY_WAIT] = set(RUNNING_STATES) | {

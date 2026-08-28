@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
@@ -128,6 +128,68 @@ _JOBS_V3_REBUILD = [
 ]
 
 
+_MODEL_INSTALL_STATE_V5_DDL = """
+CREATE TABLE model_install_state (
+    model_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    version VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    downloaded_bytes INTEGER NOT NULL,
+    expected_size_bytes INTEGER NOT NULL,
+    temp_path VARCHAR,
+    installed_path VARCHAR,
+    content_sha256 VARCHAR(64),
+    error_code VARCHAR(64),
+    error_detail TEXT,
+    updated_at FLOAT NOT NULL
+)
+"""
+
+_MODEL_INSTALL_V6_DDL = """
+CREATE TABLE model_install (
+    model_id VARCHAR(64) NOT NULL,
+    version VARCHAR(64) NOT NULL,
+    installed_path VARCHAR NOT NULL,
+    installed_at FLOAT NOT NULL,
+    PRIMARY KEY (model_id, version)
+)
+"""
+
+_ACTIVE_MODEL_V6_DDL = """
+CREATE TABLE active_model (
+    model_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    active_version VARCHAR(64) NOT NULL,
+    updated_at FLOAT NOT NULL
+)
+"""
+
+_MODEL_DOWNLOAD_V6_DDL = """
+CREATE TABLE model_download (
+    operation_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    model_id VARCHAR(64) NOT NULL,
+    version VARCHAR(64) NOT NULL,
+    source_url VARCHAR NOT NULL,
+    source_kind VARCHAR(16) NOT NULL,
+    expected_sha256 VARCHAR(64) NOT NULL,
+    expected_size_bytes INTEGER NOT NULL,
+    downloaded_bytes INTEGER NOT NULL,
+    temp_path VARCHAR,
+    etag VARCHAR,
+    last_modified VARCHAR,
+    status VARCHAR(32) NOT NULL,
+    error_code VARCHAR(64),
+    error_detail TEXT,
+    revision INTEGER NOT NULL,
+    created_at FLOAT NOT NULL,
+    updated_at FLOAT NOT NULL
+)
+"""
+
+_MODEL_DOWNLOAD_ACTIVE_INDEX_V6 = """
+CREATE UNIQUE INDEX uq_model_download_active ON model_download (model_id)
+WHERE status IN ('pending', 'downloading', 'verifying', 'installing')
+"""
+
+
 async def _apply_v1(conn: AsyncConnection) -> None:
     await conn.execute(text(_JOBS_V1_DDL))
 
@@ -148,11 +210,46 @@ async def _apply_v4(conn: AsyncConnection) -> None:
     await conn.execute(text("ALTER TABLE app_settings ADD COLUMN llm_credential_ref VARCHAR(128)"))
 
 
+async def _apply_v5(conn: AsyncConnection) -> None:
+    await conn.execute(text(_MODEL_INSTALL_STATE_V5_DDL))
+
+
+async def _apply_v6(conn: AsyncConnection) -> None:
+    await conn.execute(text("DROP TABLE model_install_state"))
+    await conn.execute(text(_MODEL_INSTALL_V6_DDL))
+    await conn.execute(text(_ACTIVE_MODEL_V6_DDL))
+    await conn.execute(text(_MODEL_DOWNLOAD_V6_DDL))
+    await conn.execute(text(_MODEL_DOWNLOAD_ACTIVE_INDEX_V6))
+
+
+async def _apply_v7(conn: AsyncConnection) -> None:
+    tables = set(
+        (await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")))
+        .scalars()
+        .all()
+    )
+    if "jobs" in tables:
+        await conn.execute(text("ALTER TABLE jobs ADD COLUMN asr_provider_id VARCHAR(64)"))
+        await conn.execute(text("ALTER TABLE jobs ADD COLUMN asr_model_id VARCHAR(64)"))
+        await conn.execute(text("ALTER TABLE jobs ADD COLUMN asr_model_version VARCHAR(64)"))
+        await conn.execute(
+            text("ALTER TABLE jobs ADD COLUMN asr_recommendation_model_id VARCHAR(64)")
+        )
+    if "app_settings" in tables:
+        await conn.execute(text("ALTER TABLE app_settings ADD COLUMN asr_provider VARCHAR(64)"))
+        await conn.execute(
+            text("ALTER TABLE app_settings ADD COLUMN whisper_cpp_executable VARCHAR")
+        )
+
+
 _MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _apply_v1),
     (2, _apply_v2),
     (3, _apply_v3),
     (4, _apply_v4),
+    (5, _apply_v5),
+    (6, _apply_v6),
+    (7, _apply_v7),
 ]
 
 

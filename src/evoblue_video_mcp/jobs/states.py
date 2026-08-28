@@ -9,6 +9,7 @@ class JobStatus(StrEnum):
     FETCHING_SUBTITLES = "fetching_subtitles"
     DOWNLOADING_AUDIO = "downloading_audio"
     TRANSCRIBING = "transcribing"
+    WAITING_FOR_MODEL = "waiting_for_model"
     CLEANING_TRANSCRIPT = "cleaning_transcript"
     CHUNKING = "chunking"
     SUMMARIZING_CHUNKS = "summarizing_chunks"
@@ -24,4 +25,3 @@ TERMINAL_JOB_STATUSES = frozenset(
     {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
 )
 ACTIVE_JOB_STATUSES = frozenset(JobStatus) - TERMINAL_JOB_STATUSES
-

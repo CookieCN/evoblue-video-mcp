@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     local_access_token: str = ""
     telemetry_enabled: bool = False
     data_directory: Path | None = None
+    asr_model_dir: Path | None = None
     worker_owner: str = "local-worker"
     worker_lease_seconds: float = Field(default=60.0, gt=0)
     worker_idle_sleep: float = Field(default=1.0, gt=0)

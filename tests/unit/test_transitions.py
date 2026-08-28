@@ -19,6 +19,8 @@ def test_linear_pipeline_forward_moves_are_valid() -> None:
         (JobStatus.FETCHING_SUBTITLES, JobStatus.DOWNLOADING_AUDIO),
         (JobStatus.FETCHING_SUBTITLES, JobStatus.CLEANING_TRANSCRIPT),
         (JobStatus.DOWNLOADING_AUDIO, JobStatus.TRANSCRIBING),
+        (JobStatus.TRANSCRIBING, JobStatus.WAITING_FOR_MODEL),
+        (JobStatus.WAITING_FOR_MODEL, JobStatus.TRANSCRIBING),
         (JobStatus.TRANSCRIBING, JobStatus.CLEANING_TRANSCRIPT),
         (JobStatus.CLEANING_TRANSCRIPT, JobStatus.CHUNKING),
         (JobStatus.CHUNKING, JobStatus.SUMMARIZING_CHUNKS),
@@ -34,6 +36,10 @@ def test_running_state_can_pause_to_retry_or_fail() -> None:
     for state in RUNNING_STATES:
         assert is_valid_transition(state, JobStatus.RETRY_WAIT)
         assert is_valid_transition(state, JobStatus.FAILED)
+
+
+def test_waiting_for_model_is_not_a_running_claimable_stage() -> None:
+    assert JobStatus.WAITING_FOR_MODEL not in RUNNING_STATES
 
 
 def test_retry_wait_reenters_any_running_stage_or_terminates() -> None:

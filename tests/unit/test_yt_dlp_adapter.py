@@ -8,6 +8,7 @@ import yt_dlp.utils
 
 from evoblue_video_mcp.platforms.base import (
     METADATA_FETCH_FAILED,
+    SUBTITLE_MISSING,
     SUBTITLE_UNAVAILABLE,
     AdapterError,
 )
@@ -93,14 +94,14 @@ async def test_fetch_transcript(patch_ytdlp) -> None:
     assert transcript.segments[1].end == 4.0
 
 
-async def test_fetch_transcript_unavailable(patch_ytdlp) -> None:
+async def test_fetch_transcript_missing(patch_ytdlp) -> None:
     patch_ytdlp({"title": "No subs", "subtitles": {}, "automatic_captions": {}})
     adapter = YtDlpAdapter()
     ref = VideoRef(Platform.BILIBILI, "BV1xx", "https://www.bilibili.com/video/BV1xx")
 
     with pytest.raises(AdapterError) as exc:
         await adapter.fetch_transcript(ref)
-    assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.error_code == SUBTITLE_MISSING
 
 
 def _mock_status_client(status_code: int) -> httpx.AsyncClient:
@@ -192,7 +193,7 @@ async def test_fetch_transcript_bad_format_is_not_retryable(patch_ytdlp) -> None
 
     with pytest.raises(AdapterError) as exc:
         await adapter.fetch_transcript(ref)
-    assert exc.value.error_code == SUBTITLE_UNAVAILABLE
+    assert exc.value.error_code == SUBTITLE_MISSING
     assert exc.value.retryable is False
 
 

@@ -18,6 +18,10 @@ class Job(Base):
     mode: Mapped[str] = mapped_column(String(32), default="auto")
     asr: Mapped[str] = mapped_column(String(32), default="auto")
     language: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    asr_provider_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    asr_model_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    asr_model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    asr_recommendation_model_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_fingerprint: Mapped[str] = mapped_column(String(64))
 
     status: Mapped[str] = mapped_column(String(32), index=True)
@@ -51,6 +55,8 @@ class AppSettings(Base):
     llm_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     llm_credential_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    asr_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    whisper_cpp_executable: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[float] = mapped_column(Float)
 
 
@@ -75,5 +81,50 @@ class JobArtifact(Base):
     relative_path: Mapped[str | None] = mapped_column(String, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)
+
+
+class ModelInstall(Base):
+    """One installed model version, keyed by (model_id, version)."""
+
+    __tablename__ = "model_install"
+
+    model_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    installed_path: Mapped[str] = mapped_column(String)
+    installed_at: Mapped[float] = mapped_column(Float)
+
+
+class ActiveModel(Base):
+    """The currently active version pointer for one model."""
+
+    __tablename__ = "active_model"
+
+    model_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    active_version: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[float] = mapped_column(Float)
+
+
+class ModelDownload(Base):
+    """One download operation, with resume identity and optimistic revision."""
+
+    __tablename__ = "model_download"
+
+    operation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_id: Mapped[str] = mapped_column(String(64))
+    version: Mapped[str] = mapped_column(String(64))
+    source_url: Mapped[str] = mapped_column(String)
+    source_kind: Mapped[str] = mapped_column(String(16))
+    expected_sha256: Mapped[str] = mapped_column(String(64))
+    expected_size_bytes: Mapped[int] = mapped_column(Integer)
+    downloaded_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    temp_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String(32))
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)

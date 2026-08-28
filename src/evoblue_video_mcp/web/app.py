@@ -8,10 +8,12 @@ from contextlib import AbstractAsyncContextManager
 from typing import Literal, TypedDict
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.params import Depends as DependsParam
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
 from evoblue_video_mcp.application.submit import compute_config_fingerprint, submit_video
+from evoblue_video_mcp.asr.service import ModelManagerService, ModelSummary
 from evoblue_video_mcp.config import CredentialStore, Settings, llm_credential_reference
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.platforms.detector import PlatformError
@@ -29,8 +31,11 @@ from evoblue_video_mcp.web.schemas import (
     JobDetailResponse,
     JobListItem,
     JobListResponse,
+    ModelListResponse,
+    ModelSummaryResponse,
     SubmitJobInput,
     SubmitJobResponse,
+    UninstallResponse,
 )
 
 
@@ -64,6 +69,10 @@ def _to_detail(job: Job) -> JobDetailResponse:
         retryable=job.retryable,
         created_at=job.created_at,
         updated_at=job.updated_at,
+        asr_provider_id=job.asr_provider_id,
+        asr_model_id=job.asr_model_id,
+        asr_model_version=job.asr_model_version,
+        asr_recommendation_model_id=job.asr_recommendation_model_id,
     )
 
 
@@ -72,11 +81,13 @@ def create_app(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     local_token: str | None = None,
     credential_store: CredentialStore | None = None,
+    model_service: ModelManagerService | None = None,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
     """Create the Local Engine HTTP application.
 
-    Data endpoints attach when a session factory is given. When ``local_token``
+    Data endpoints attach when a session factory is given; model-management
+    endpoints attach when a ``model_service`` is also given. When ``local_token``
     (or ``Settings.local_access_token``) is set, data endpoints require it via the
     ``X-Local-Token`` header; ``/api/health`` stays token-exempt.
     """
@@ -91,7 +102,7 @@ def create_app(
         return {"status": "ok", "service": app_settings.app_name, "version": __version__}
 
     if session_factory is not None:
-        _register_data_endpoints(app, session_factory, token, credential_store)
+        _register_data_endpoints(app, session_factory, token, credential_store, model_service)
 
     return app
 
@@ -101,6 +112,7 @@ def _register_data_endpoints(
     session_factory: async_sessionmaker[AsyncSession],
     token: str,
     credential_store: CredentialStore | None,
+    model_service: ModelManagerService | None,
 ) -> None:
     async def credential_is_configured(reference: str | None) -> bool:
         if credential_store is None or reference is None:
@@ -166,6 +178,8 @@ def _register_data_endpoints(
             llm_base_url=current.llm_base_url,
             llm_model=current.llm_model,
             llm_api_key_configured=await credential_is_configured(current.llm_credential_ref),
+            asr_provider=current.asr_provider or "auto",
+            whisper_cpp_executable=current.whisper_cpp_executable,
         )
 
     @app.put("/api/settings", response_model=AppSettingsResponse, dependencies=dependencies)
@@ -223,7 +237,23 @@ def _register_data_endpoints(
                     else (current.llm_model if current else None)
                 ),
                 llm_credential_ref=credential_ref,
+                asr_provider=(
+                    payload.asr_provider
+                    if "asr_provider" in fields
+                    else ((current.asr_provider if current else None) or "auto")
+                ),
+                whisper_cpp_executable=(
+                    payload.whisper_cpp_executable
+                    if "whisper_cpp_executable" in fields
+                    else (current.whisper_cpp_executable if current else None)
+                ),
             )
+        if "whisper_cpp_executable" in fields and model_service is not None:
+            # A newly usable CLI can unblock jobs parked on a whisper
+            # recommendation; provider registration and the resume both happen
+            # inside the reconciliation, retrying providers whose last load
+            # failed (the settings event may have fixed them).
+            await model_service.reconcile_waiting(retry_failed_loads=True)
         return AppSettingsResponse(
             setup_completed=saved.setup_completed,
             report_directory=saved.report_directory,
@@ -231,6 +261,8 @@ def _register_data_endpoints(
             llm_base_url=saved.llm_base_url,
             llm_model=saved.llm_model,
             llm_api_key_configured=await credential_is_configured(saved.llm_credential_ref),
+            asr_provider=saved.asr_provider or "auto",
+            whisper_cpp_executable=saved.whisper_cpp_executable,
         )
 
     @app.post("/api/jobs", response_model=SubmitJobResponse, dependencies=dependencies)
@@ -242,7 +274,10 @@ def _register_data_endpoints(
                 base_url = (app_settings.llm_base_url if app_settings else None) or ""
                 model = (app_settings.llm_model if app_settings else None) or ""
                 config_fp = compute_config_fingerprint(
-                    provider=provider, base_url=base_url, model=model
+                    provider=provider,
+                    base_url=base_url,
+                    model=model,
+                    asr_provider=(app_settings.asr_provider if app_settings else None) or "auto",
                 )
                 job, reused = await submit_video(
                     sess,
@@ -257,3 +292,84 @@ def _register_data_endpoints(
         except PlatformError as exc:
             raise HTTPException(status_code=422, detail=exc.error_code) from exc
         return SubmitJobResponse(job_id=job.job_id, status=job.status, reused=reused)
+
+    if model_service is not None:
+        _register_model_endpoints(app, model_service, dependencies)
+
+
+def _to_model_summary(summary: ModelSummary) -> ModelSummaryResponse:
+    return ModelSummaryResponse(
+        model_id=summary.model_id,
+        version=summary.version,
+        tier=summary.tier,
+        provider=summary.provider,
+        languages=list(summary.languages),
+        compressed_size_bytes=summary.compressed_size_bytes,
+        installed_size_bytes=summary.installed_size_bytes,
+        license=summary.license,
+        attribution=summary.attribution,
+        redistribution=summary.redistribution,
+        installed=summary.installed,
+        active=summary.active,
+        installed_path=summary.installed_path,
+        status=summary.status,
+        downloaded_bytes=summary.downloaded_bytes,
+        error_code=summary.error_code,
+        formal_default=summary.formal_default,
+    )
+
+
+def _register_model_endpoints(
+    app: FastAPI,
+    model_service: ModelManagerService,
+    dependencies: list[DependsParam],
+) -> None:
+    @app.get("/api/models", response_model=ModelListResponse, dependencies=dependencies)
+    async def models_list() -> ModelListResponse:
+        items = await model_service.list_models()
+        return ModelListResponse(items=[_to_model_summary(s) for s in items])
+
+    @app.post(
+        "/api/models/{model_id}/install",
+        response_model=ModelSummaryResponse,
+        dependencies=dependencies,
+        status_code=202,
+    )
+    async def model_install(model_id: str) -> ModelSummaryResponse:
+        try:
+            summary = await model_service.install(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="model not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _to_model_summary(summary)
+
+    @app.post(
+        "/api/models/{model_id}/cancel",
+        response_model=ModelSummaryResponse,
+        dependencies=dependencies,
+    )
+    async def model_cancel(model_id: str) -> ModelSummaryResponse:
+        try:
+            summary = await model_service.cancel(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="model not found") from exc
+        return _to_model_summary(summary)
+
+    @app.delete(
+        "/api/models/{model_id}",
+        response_model=UninstallResponse,
+        dependencies=dependencies,
+    )
+    async def model_uninstall(model_id: str) -> UninstallResponse:
+        try:
+            result = await model_service.uninstall(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="model not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return UninstallResponse(
+            model_id=model_id,
+            reclaimed_bytes=result.reclaimed_bytes,
+            pending_reclaim_bytes=result.pending_reclaim_bytes,
+        )

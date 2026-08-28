@@ -262,6 +262,8 @@ async def run_worker_once(
                         lease_seconds=lease_seconds,
                         progress=outcome.progress,
                     )
+                if JobStatus(job.status) is JobStatus.WAITING_FOR_MODEL:
+                    break
                 heartbeat_stop = asyncio.Event()
                 heartbeat = asyncio.create_task(
                     _heartbeat_lease(

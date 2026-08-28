@@ -194,6 +194,8 @@ def test_build_handlers_assembles_full_set(tmp_path) -> None:
     assert set(handlers) == {
         JobStatus.FETCHING_METADATA,
         JobStatus.FETCHING_SUBTITLES,
+        JobStatus.DOWNLOADING_AUDIO,
+        JobStatus.TRANSCRIBING,
         JobStatus.CLEANING_TRANSCRIPT,
         JobStatus.CHUNKING,
         JobStatus.SUMMARIZING_CHUNKS,

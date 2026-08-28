@@ -105,6 +105,71 @@ async def _schema_snapshot(engine) -> dict:
         return snapshot
 
 
+_HISTORICAL_V5 = """
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
+INSERT INTO schema_migrations VALUES (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0);
+CREATE TABLE model_install_state (
+    model_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    version VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    downloaded_bytes INTEGER NOT NULL,
+    expected_size_bytes INTEGER NOT NULL,
+    temp_path VARCHAR,
+    installed_path VARCHAR,
+    content_sha256 VARCHAR(64),
+    error_code VARCHAR(64),
+    error_detail TEXT,
+    updated_at FLOAT NOT NULL
+);
+"""
+
+
+async def test_frozen_v5_database_upgrades_to_current(tmp_path) -> None:
+    db_path = tmp_path / "v5.db"
+    sqlite3.connect(db_path).executescript(_HISTORICAL_V5)
+    engine = build_engine(db_path)
+    await init_db(engine)
+
+    async with engine.connect() as conn:
+        version = (await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))).scalar()
+        assert version == SCHEMA_VERSION
+        old = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                    " AND name='model_install_state'"
+                )
+            )
+        ).scalar()
+        assert old is None
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                    " AND name IN ('model_install', 'active_model', 'model_download')"
+                )
+            )
+        ).scalars().all()
+        assert set(tables) == {"model_install", "active_model", "model_download"}
+    await engine.dispose()
+
+
+async def test_model_tables_created(tmp_path) -> None:
+    engine = build_engine(tmp_path / "fresh.db")
+    await init_db(engine)
+    async with engine.connect() as conn:
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                    " AND name IN ('model_install', 'active_model', 'model_download')"
+                )
+            )
+        ).scalars().all()
+        assert set(tables) == {"model_install", "active_model", "model_download"}
+    await engine.dispose()
+
+
 async def test_fresh_install_matches_upgraded_v2(tmp_path) -> None:
     fresh_engine = build_engine(tmp_path / "fresh.db")
     await init_db(fresh_engine)

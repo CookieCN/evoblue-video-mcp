@@ -1,0 +1,34 @@
+{
+  "model_id": "sensevoice-small-int8",
+  "version": "2024-07-17",
+  "provider": "sherpa-onnx",
+  "languages": ["zh", "en", "ja", "ko", "yue"],
+  "platforms": ["windows-x86_64", "linux-x86_64"],
+  "compressed_size_bytes": 163002883,
+  "installed_size_bytes": 239549735,
+  "license": "FunASR Model License 1.1",
+  "attribution": "FunAudioLLM (Alibaba)",
+  "upstream_url": "https://github.com/FunAudioLLM/SenseVoice",
+  "redistribution": "upstream_only",
+  "archive_format": "tar.bz2",
+  "sources": [
+    {
+      "url": "https://example.invalid/models/sensevoice-small-int8.tar.bz2",
+      "kind": "upstream",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 163002883
+    }
+  ],
+  "files": [
+    {
+      "name": "model.int8.onnx",
+      "size_bytes": 239233841,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "tokens.txt",
+      "size_bytes": 315894,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

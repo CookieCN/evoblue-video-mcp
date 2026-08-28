@@ -7,8 +7,8 @@
 ## 当前阶段
 
 - 初始化日期：2026-08-24
-- 当前阶段：P1 — Local Engine、SQLite、Worker、WebUI 框架
-- P1 已完成最小闭环：SQLite Job 模型、版本化迁移、单 Worker 租约与崩溃恢复。
+- 当前阶段：P3 — 历史、Markdown、FTS5、索引重建（P2 已验收；P6/ASR 的 ASR-0～ASR-3 已完成，ASR-4 待开工）
+- P1/P2 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环；ASR 兜底下一主矛盾转入 Model Manager 与中国下载链路。
 
 ## Owner Context
 
@@ -32,7 +32,7 @@
 ## Tech Stack
 
 - Python 3.11、FastAPI、Pydantic Settings、SQLAlchemy Async、SQLite/FTS5、MCP Python SDK。
-- httpx、yt-dlp、keyring、platformdirs、structlog、tenacity；可选 faster-whisper/CTranslate2/FFmpeg。
+- httpx、yt-dlp、keyring、platformdirs、structlog、tenacity；FFmpeg；规划采用 sherpa-onnx + SenseVoiceSmall INT8，whisper.cpp/faster-whisper 仅作可选兼容能力。
 - React、Vite、React Router、Tailwind CSS 4、Vitest、ESLint。
 - uv、pytest、Ruff、mypy、PyInstaller onedir、GitHub Actions。
 
@@ -41,6 +41,8 @@
 | # | 踩过什么坑 | 规则 |
 |---|---|---|
 | 1 | 当前沙箱账户与仓库所有者不同，Git 会报告 dubious ownership | 仅对单次 Git 命令使用 `git -c safe.directory=...`，不得修改用户全局配置。 |
+| 2 | Windows sandbox 曾把 `.agents` Owner 改为 `CodexSandboxOffline`，导致所有命令在 setup refresh 阶段失败 | 先查 `~/.codex/.sandbox/sandbox.YYYY-MM-DD.log`；只恢复日志点名目录的 Owner，不扩大 ACL、不长期绕过 sandbox。 |
+| 3 | Windows System32 可能提供 ONNX Runtime 1.10，导致 sherpa 报 `version [27] ... only 1 to 10` | 这是 C API DLL 冲突，不是模型版本；Provider 必须在 import sherpa 前注册 ASR 环境的 `onnxruntime/capi` DLL 目录，真实模型加载测试不可跳过。 |
 
 ## Architecture Decisions
 
@@ -50,6 +52,12 @@
 - **Markdown 是事实资产**：数据库可丢失并从 Markdown 重建；已完成报告不得只存在 SQLite。
 - **故障即安全**：Engine 只绑定 loopback，凭据进入系统凭据库，日志脱敏，子进程禁止 `shell=True`。
 - **阶段持久化**：每个 Job 阶段幂等且状态先持久化，重启恢复不依赖仅存在内存中的任务。
+- **ASR 是可插拔能力，不是安装包负担**：平台字幕优先；中文采用同一 sherpa-onnx 运行时下的 Lite/Standard 分层，Lite 候选为约 63.4 MB 的离线 Zipformer CTC small INT8，Standard 候选为约 228 MB 的 INT8-only SenseVoiceSmall；其他语言由可选 `whisper.cpp` 包兜底。模型权重不进入基础安装包，由 Local Engine Model Manager 按需、可续传、校验后安装。生产 Manifest 禁止下载同时含 FP32 与 INT8 的 SenseVoice 完整包；每一层只有通过项目基准、许可审查与中国下载链路验证后才能成为正式推荐；执行计划见 `docs/ASR_PLAN.md`。
+- **ASR 合同层（ASR-0）**：Provider 协议见 `src/evoblue_video_mcp/asr/base.py`（归一化结果强制不变量 + 取消/进度行为合同），模型 Manifest 校验见 `asr/manifest.py`，基准评分命令 `python -m evoblue_video_mcp.asr.benchmark`。具体引擎只允许在 `asr/providers/` 下 import；核心层通过 Provider 注册表获取引擎（ASR-1），静态扫描 + 基础依赖守卫只作防手滑护栏，不能靠字符串扫描实现严格隔离。
+- **ASR-1 已完成**：Lite/Standard 已通过真实模型加载与转写、60 分钟有界单调分段、运行中取消后的 checkpoint/resume 和许可证清单验收；Fake 全绿不得替代真实引擎门禁。
+- **模型许可必须落到精确制品**：代码仓库许可证不等于模型权重或转换归档许可证。SenseVoice 制品按 FunASR Model License 1.1 留证；Zipformer 精确归档的使用/再分发声明尚待确认。生产 Manifest 必须区分 `upstream_only`、`mirror_approved` 与 `blocked`；未审批镜像不得成为下载源。
+- **ASR-2 模型交付已落地**：`asr/manifests.py` 内置 Lite/Standard 生产 Manifest（`upstream_only`，钉实测逐文件 SHA）；`installer` 多源回退（某源失败切下一源即从零下载，坏 partial 不跨源续传）；`asr/service.py` + `/api/models` + 前端 `/models` 页提供安装/取消/卸载。中国源按「器械+留证、暂不落镜像」交付：hf-mirror 实测可达可续传，但散文件 SHA 与归档不同、Lite 归档无许可证，故不 ship 任何 `mirror_approved` 源（见 `docs/ASR_CHINA_SOURCE_QUALIFICATION.md`）。
+- **ASR-3 路由闭环已落地**：语言感知路由优先复用已安装模型；SenseVoice 覆盖语言不要求 Whisper，其他语言只建议可选 `whisper-cpp-base`。缺模型进入非 claimable 的 `waiting_for_model`，持久化单一安装建议且不隐式下载；恢复走统一 reconciliation（双门禁：SQLite 安装记录 + Provider 已注册；触发点为 Engine 启动、安装完成、保存 whisper CLI 路径），消除安装提交后崩溃导致的永久等待，CLI 后配置也能自动恢复。Silero VAD 是随包受管依赖（识别归档不含 VAD，`asr/vad.py` 钉 SHA 校验，资源访问全程包在故障边界内——缺失/不可读只降级为 Tier 未就绪，绝不阻塞 Engine 启动）；Provider 注册是期望状态对账：CLI 更换/清空与模型文件删除会替换或注销注册（所有权按实例追踪，外部注册不受影响），卸载模型即时注销引擎；Provider 加载失败只让该 Tier 保持未注册（已知坏签名仅事件路径重试），绝不阻塞 Engine 启动，加载失败日志只记 provider_id + 稳定错误码 + 异常类型。Silero MIT 完整许可文本已随包与第三方声明落证。应用级固定 Provider 覆盖自动路由，报告记录实际 provider/model/version。Lite 可安装和明确选择，但精确制品许可证未确认且 ASR-4 基准未完成，任何 Tier 都不得标记为正式默认已批准。
 
 ## Environment & Commands
 
@@ -86,4 +94,3 @@ cd frontend && npm install && npm run lint && npm run test -- --run && npm run b
 - 密钥、token、密码不进代码；日志、诊断和错误返回必须脱敏。
 - 不自动 git push，不自动部署，不启动长期运行服务。
 - 收工按实际变化更新 feature list → progress → experience（有坑）→ CHANGELOG（重要变化）→ AGENTS（规则/架构变化）。
-

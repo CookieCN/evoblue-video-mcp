@@ -1,6 +1,6 @@
 {
   "project": "EvoBlue Video MCP",
-  "updated": "2026-08-25",
+  "updated": "2026-08-28",
   "modules": {
     "p0_foundation": {
       "name": "P0 Harness, contracts, and skeleton",
@@ -34,15 +34,27 @@
       "status": "planned",
       "features": [
         {"id": "P1", "name": "Local Engine, SQLite, Worker, WebUI framework", "status": "done"},
-        {"id": "P2", "name": "YouTube/Bilibili subtitle analysis loop", "status": "planned"},
+        {"id": "P2", "name": "YouTube/Bilibili subtitle analysis loop", "status": "done"},
         {"id": "P3", "name": "History, Markdown, FTS5, index rebuild", "status": "planned"},
         {"id": "P4", "name": "STDIO MCP Bridge and four clients", "status": "planned"},
         {"id": "P5", "name": "WebUI MCP configuration and handshake", "status": "planned"},
-        {"id": "P6", "name": "Faster-Whisper model management and recovery", "status": "planned"},
+        {"id": "P6", "name": "Pluggable ASR, model management, and recovery", "status": "in_progress"},
         {"id": "P7", "name": "Windows installer and GitHub Release", "status": "planned"},
         {"id": "P8", "name": "Public testing and Harness hardening", "status": "planned"}
       ]
+    },
+    "p6_asr": {
+      "name": "P6 Pluggable local ASR and model delivery",
+      "status": "in_progress",
+      "contract": "docs/ASR_PLAN.md",
+      "features": [
+        {"id": "ASR-0", "name": "Provider contract, model manifest, and benchmark fixture", "status": "done"},
+        {"id": "ASR-1", "name": "sherpa-onnx Lite Zipformer + Standard SenseVoice proof of capability", "status": "done"},
+        {"id": "ASR-2", "name": "Resumable Model Manager and China download path", "status": "done"},
+        {"id": "ASR-3", "name": "Lite/Standard tier routing and optional whisper.cpp fallback", "status": "done"},
+        {"id": "ASR-4", "name": "Packaging, license, benchmark, and release hardening", "status": "planned"}
+      ]
     }
   },
-  "summary": {"done": 16, "in_progress": 0, "planned": 7, "completion_pct": 69.6}
+  "summary": {"done": 21, "in_progress": 1, "planned": 6, "completion_pct": 75.0}
 }

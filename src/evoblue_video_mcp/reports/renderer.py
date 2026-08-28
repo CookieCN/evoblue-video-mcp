@@ -24,6 +24,9 @@ def _render_frontmatter(doc: ReportDocument) -> str:
         f"analyzed_at: {_yaml(doc.analyzed_at.isoformat())}",
         f"summary_mode: {_yaml(doc.summary_mode)}",
         f"language: {_yaml(doc.language)}",
+        f"asr_provider: {_yaml(doc.asr_provider)}",
+        f"asr_model: {_yaml(doc.asr_model)}",
+        f"asr_model_version: {_yaml(doc.asr_model_version)}",
         f"tags: {json.dumps(doc.tags, ensure_ascii=False)}",
     ]
     return "---\n" + "\n".join(fields) + "\n---"
