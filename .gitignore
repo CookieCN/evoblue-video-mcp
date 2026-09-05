@@ -27,3 +27,10 @@ Thumbs.db
 # Generated ASR benchmark audio (permissioned TTS corpus, regenerated locally)
 benchmarks/corpus/
 benchmarks/_work/
+
+# Local agent-session state (not project code)
+.claude/
+
+# Foreign agent-session worktrees checked out inside the repo (remove via
+# `git worktree remove` in the owning repo, never by deleting the directory)
+.codex-worktrees/

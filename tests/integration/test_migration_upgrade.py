@@ -1,4 +1,4 @@
-"""A frozen historical v2 database upgrades to v3, preserving data and index names."""
+"""Historical databases upgrade to the current schema, preserving data and indexes."""
 
 import sqlite3
 
@@ -167,6 +167,110 @@ async def test_model_tables_created(tmp_path) -> None:
             )
         ).scalars().all()
         assert set(tables) == {"model_install", "active_model", "model_download"}
+    await engine.dispose()
+
+
+_V8_TABLES = (
+    "report_documents",
+    "report_fts",
+    "index_issues",
+    "index_status",
+)
+
+
+async def test_fresh_database_reaches_v8(tmp_path) -> None:
+    """P3-005 gate 1: an empty database migrates straight to v8."""
+    engine = build_engine(tmp_path / "fresh.db")
+    await init_db(engine)
+    async with engine.connect() as conn:
+        version = (await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))).scalar()
+        assert version == SCHEMA_VERSION == 8
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    f"AND name IN {_V8_TABLES}"
+                )
+            )
+        ).scalars().all()
+        assert set(tables) == set(_V8_TABLES)
+        state = (await conn.execute(text("SELECT state FROM index_status WHERE id = 1"))).scalar()
+        assert state == "idle"
+    await engine.dispose()
+
+
+async def test_v7_database_upgrades_to_v8_preserving_data(tmp_path) -> None:
+    """P3-005 gate 2: a real v7 database (chain stopped at 7) upgrades to v8."""
+    db_path = tmp_path / "v7.db"
+    engine7 = build_engine(db_path)
+    await init_db(engine7, target_version=7)
+    await engine7.dispose()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO jobs (job_id, request_fingerprint, url, mode, asr, "
+        "config_fingerprint, status, progress, attempt, max_attempts, "
+        "retryable, created_at, updated_at) VALUES "
+        "('job-legacy', 'fp-legacy', 'https://www.youtube.com/watch?v=x', "
+        "'auto', 'auto', 'cfg', 'completed', 100, 1, 3, 0, 1000.0, 2000.0)"
+    )
+    conn.execute(
+        "INSERT INTO app_settings (id, setup_completed, updated_at) VALUES (1, 1, 1000.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    engine = build_engine(db_path)
+    await init_db(engine)
+    async with engine.connect() as conn:
+        version = (await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))).scalar()
+        assert version == SCHEMA_VERSION == 8
+        legacy = (
+            await conn.execute(
+                text("SELECT status FROM jobs WHERE job_id = 'job-legacy'")
+            )
+        ).scalar()
+        assert legacy == "completed"
+        setup = (await conn.execute(text("SELECT setup_completed FROM app_settings"))).scalar()
+        assert setup == 1
+        tables = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    f"AND name IN {_V8_TABLES}"
+                )
+            )
+        ).scalars().all()
+        assert set(tables) == set(_V8_TABLES)
+    await engine.dispose()
+
+
+async def test_upgrade_to_v8_matches_fresh_install(tmp_path) -> None:
+    """P3-005 gate 2/3: upgraded v7 and fresh installs converge on one schema."""
+    v7_path = tmp_path / "v7.db"
+    engine7 = build_engine(v7_path)
+    await init_db(engine7, target_version=7)
+    await engine7.dispose()
+
+    upgraded = build_engine(v7_path)
+    await init_db(upgraded)
+    fresh = build_engine(tmp_path / "fresh.db")
+    await init_db(fresh)
+
+    assert await _schema_snapshot(fresh) == await _schema_snapshot(upgraded)
+
+    await upgraded.dispose()
+    await fresh.dispose()
+
+
+async def test_init_db_v8_is_idempotent(tmp_path) -> None:
+    """P3-005 gate 3: rerunning init_db on a v8 database changes nothing."""
+    engine = build_engine(tmp_path / "db.sqlite")
+    await init_db(engine)
+    before = await _schema_snapshot(engine)
+    await init_db(engine)
+    after = await _schema_snapshot(engine)
+    assert before == after
     await engine.dispose()
 
 

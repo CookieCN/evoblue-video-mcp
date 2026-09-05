@@ -2,12 +2,15 @@
 
 import hashlib
 import uuid
+from collections.abc import Mapping
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evoblue_video_mcp.jobs import TERMINAL_JOB_STATUSES, JobStatus
 from evoblue_video_mcp.platforms.detector import detect_video
+from evoblue_video_mcp.storage.db import BEGIN_IMMEDIATE_OPTION
 from evoblue_video_mcp.storage.models import Job
 from evoblue_video_mcp.storage.repository import get_job
 
@@ -101,9 +104,14 @@ async def submit_video(
     )
 
     await session.rollback()
-    conn = await session.connection()
-    await conn.exec_driver_sql("BEGIN IMMEDIATE")
     try:
+        # BEGIN IMMEDIATE via the engine's begin hook (db.BEGIN_IMMEDIATE_OPTION):
+        # the read-then-insert below cannot interleave with a concurrent
+        # submitter — a second IMMEDIATE waits on the busy timeout instead of
+        # deadlocking on a deferred lock upgrade. The option must ride on the
+        # session connection BEFORE the transaction starts.
+        immediate_opts: Mapping[str, Any] = {BEGIN_IMMEDIATE_OPTION: True}
+        await session.connection(execution_options=immediate_opts)
         existing = await _find_reusable(session, fingerprint, now, reuse_window_seconds)
         if existing is not None:
             await session.commit()

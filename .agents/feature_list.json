@@ -91,7 +91,7 @@
     },
     "delivery_roadmap": {
       "name": "Post-P0 delivery phases",
-      "status": "planned",
+      "status": "in_progress",
       "features": [
         {
           "id": "P1",
@@ -106,7 +106,7 @@
         {
           "id": "P3",
           "name": "History, Markdown, FTS5, index rebuild",
-          "status": "in_progress"
+          "status": "done"
         },
         {
           "id": "P4",
@@ -169,7 +169,7 @@
     },
     "p3_history_index": {
       "name": "P3 History, Markdown, FTS5, and index rebuild",
-      "status": "in_progress",
+      "status": "done",
       "contract": "docs/FTS5_SCHEMA.md + docs/INDEX_REBUILD.md + docs/HISTORY_SEARCH_API.md + docs/MARKDOWN_SCHEMA.md",
       "features": [
         {
@@ -195,25 +195,25 @@
         {
           "id": "P3-005",
           "name": "Migration v8 + report/FTS repositories implemented",
-          "status": "planned"
+          "status": "done"
         },
         {
           "id": "P3-006",
           "name": "Pipeline indexing stage + history/search/index API endpoints implemented",
-          "status": "planned"
+          "status": "done"
         },
         {
           "id": "P3-007",
           "name": "Rebuild engine + PRD P3 acceptance tests (delete SQLite, rebuild searchable)",
-          "status": "planned"
+          "status": "done"
         }
       ]
     }
   },
   "summary": {
-    "done": 27,
-    "in_progress": 1,
-    "planned": 7,
-    "completion_pct": 77.1
+    "done": 31,
+    "in_progress": 0,
+    "planned": 4,
+    "completion_pct": 88.6
   }
 }

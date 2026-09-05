@@ -125,3 +125,108 @@ class UninstallResponse(StrictModel):
     model_id: str
     reclaimed_bytes: int = Field(ge=0)
     pending_reclaim_bytes: int = Field(ge=0)
+
+
+# --- P3 history / search / index API (docs/HISTORY_SEARCH_API.md) ---
+
+
+class HistoryItem(StrictModel):
+    job_id: str
+    analysis_id: str
+    title: str
+    platform: str
+    author: str
+    video_id: str
+    source_url: str
+    published_at: float | None = None
+    analyzed_at: float
+    language: str
+    summary_mode: str
+    asr_provider: str
+    asr_model: str
+    asr_model_version: str
+    tags: list[str]
+    summary_preview: str
+    file_path: str
+    content_hash: str
+    doc_status: str
+    indexed_at: float
+
+
+class HistoryListResponse(StrictModel):
+    items: list[HistoryItem]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+
+
+class HistoryDetailResponse(HistoryItem):
+    core_summary: str | None = None
+
+
+class ReportContentResponse(StrictModel):
+    job_id: str
+    section: str
+    markdown: str
+    file_path: str
+    schema_version: int
+    truncated: bool
+
+
+class SearchHit(StrictModel):
+    job_id: str
+    title: str
+    platform: str
+    analyzed_at: float
+    snippet: str
+    matched_fields: list[str]
+    doc_status: str
+
+
+class SearchResponse(StrictModel):
+    items: list[SearchHit]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=50)
+    offset: int = Field(ge=0)
+
+
+class RebuildCounters(StrictModel):
+    scanned: int = 0
+    indexed: int = 0
+    unchanged: int = 0
+    quarantined: int = 0
+    duplicates: int = 0
+    removed: int = 0
+    purged: int = 0
+
+
+class IndexStatusResponse(StrictModel):
+    state: str
+    last_finished_at: float | None = None
+    last_result: RebuildCounters
+    open_issues: int
+    last_error_code: str | None = None
+
+
+class IndexIssueItem(StrictModel):
+    issue_code: str
+    relative_path: str
+    detail: str | None = None
+    first_seen_at: float
+    last_seen_at: float
+    resolved_at: float | None = None
+
+
+class IndexIssuesResponse(StrictModel):
+    items: list[IndexIssueItem]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+
+
+class IndexRebuildRequest(StrictModel):
+    purge_missing: bool = False
+
+
+class IndexRebuildAcceptedResponse(StrictModel):
+    state: str

@@ -50,11 +50,25 @@ addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
+# Resource-leak gate: an abandoned AsyncSession/connection surfaces as an
+# unraisable SAWarning during GC, which the plain -W filter misses (it is
+# wrapped by pytest as PytestUnraisableExceptionWarning). Escalate both.
+filterwarnings = [
+    "error::sqlalchemy.exc.SAWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+    # aiosqlite worker threads outliving a closed event loop leak as an
+    # unhandled thread exception — timing-dependent, so it must be an ERROR
+    # gate rather than something an exit-0 run can hide.
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+# .codex-worktrees/ holds foreign agent-session worktrees checked out inside
+# the repo directory; they are not this project's code.
+extend-exclude = [".codex-worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

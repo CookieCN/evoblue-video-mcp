@@ -12,6 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from evoblue_video_mcp.jobs.states import TERMINAL_JOB_STATUSES, JobStatus
 from evoblue_video_mcp.jobs.transitions import RUNNING_STATES, validate_transition
+from evoblue_video_mcp.storage.db import ensure_immediate_transaction
 from evoblue_video_mcp.storage.model_download import (
     ACTIVE_DOWNLOAD_STATUSES,
     ModelDownloadStatus,
@@ -32,6 +33,18 @@ _TERMINAL_VALUES = [state.value for state in TERMINAL_JOB_STATUSES]
 _RUNNING_VALUES = [state.value for state in RUNNING_STATES]
 
 MAX_ATTEMPTS_EXCEEDED = "MAX_ATTEMPTS_EXCEEDED"
+
+
+async def _begin_immediate(session: AsyncSession) -> None:
+    """Start this writer's transaction as ``BEGIN IMMEDIATE`` (§6).
+
+    Thin delegation to ``db.ensure_immediate_transaction`` — see it for the
+    exact transaction-state semantics (idempotent inside an IMMEDIATE
+    transaction; refuses a DEFERRED transaction that has executed DML as
+    tracked at the engine event layer; closes a read-only snapshot with an
+    empty commit).
+    """
+    await ensure_immediate_transaction(session)
 
 
 class LeaseLostError(RuntimeError):
@@ -118,6 +131,7 @@ async def enqueue_job(
     next_retry_at: float | None = None,
 ) -> Job:
     """Persist a new job in an initial (default ``queued``) state."""
+    await _begin_immediate(session)
     job = Job(
         job_id=job_id,
         request_fingerprint=request_fingerprint,
@@ -148,6 +162,7 @@ async def claim_job(
     now: float,
 ) -> Job | None:
     """Atomically claim one job; returns ``None`` if another owner won or it is unclaimable."""
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None or not _is_claimable(job, now):
         return None
@@ -186,6 +201,7 @@ async def claim_next_job(
     now: float,
 ) -> Job | None:
     """Claim the oldest claimable job, or ``None`` when nothing is ready."""
+    await _begin_immediate(session)
     candidates = list(
         (
             await session.scalars(
@@ -208,6 +224,7 @@ async def claim_next_job(
 
 async def recover_stale_jobs(session: AsyncSession, *, now: float) -> list[Job]:
     """Atomically release leases that expired, without racing a fresh take-over."""
+    await _begin_immediate(session)
     result = await session.execute(
         update(Job)
         .where(
@@ -237,6 +254,7 @@ async def advance_job(
     progress: int | None = None,
 ) -> Job:
     """Validate, then atomically advance a job only if ``owner`` still holds a live lease."""
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None:
         raise KeyError(f"No job with id {job_id!r}")
@@ -289,6 +307,7 @@ async def advance_job(
 
 async def fail_exhausted_retries(session: AsyncSession, *, now: float) -> list[Job]:
     """Atomically move retry_wait jobs whose attempts are exhausted into ``failed``."""
+    await _begin_immediate(session)
     result = await session.execute(
         update(Job)
         .where(
@@ -325,6 +344,7 @@ async def mark_failure(
     error_detail: str | None = None,
 ) -> Job:
     """Atomically fail a running job into ``retry_wait`` (transient) or ``failed`` (permanent)."""
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None:
         raise KeyError(f"No job with id {job_id!r}")
@@ -409,6 +429,7 @@ async def pin_job_asr_route(
     recommendation_model_id: str | None,
 ) -> Job:
     """Persist the selected ASR identity under the current worker lease."""
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None:
         raise KeyError(f"No job with id {job_id!r}")
@@ -454,6 +475,7 @@ async def resume_waiting_jobs(
     session: AsyncSession, *, model_id: str, now: float
 ) -> list[str]:
     """Resume jobs waiting for an explicitly installed model."""
+    await _begin_immediate(session)
     result = await session.execute(
         update(Job)
         .where(
@@ -490,8 +512,19 @@ async def save_app_settings(
     llm_credential_ref: str | None = None,
     asr_provider: str | None = None,
     whisper_cpp_executable: str | None = None,
+    commit: bool = True,
 ) -> AppSettings:
-    """Persist the single app-settings row (upsert); ``None`` fields clear the value."""
+    """Persist the single app-settings row (upsert); ``None`` fields clear the value.
+
+    With ``commit=False`` the caller owns the transaction: nothing is
+    committed and the in-memory object is returned WITHOUT the post-commit
+    re-read. The settings PUT needs this to coordinate the recovery-pointer
+    dual-write (INDEX_REBUILD §4): its commit runs as the LAST step of the
+    endpoint's transaction, so "the endpoint saw an exception" ⇒ "the
+    database did not adopt the value" — the pointer compensation is exact
+    and a post-commit failure can never be mistaken for a failed save.
+    """
+    await _begin_immediate(session)
     settings = await get_app_settings(session)
     if settings is None:
         settings = AppSettings(id=1)
@@ -506,6 +539,8 @@ async def save_app_settings(
     settings.asr_provider = asr_provider
     settings.whisper_cpp_executable = whisper_cpp_executable
     settings.updated_at = now
+    if not commit:
+        return settings
 
     await session.commit()
     settings = await get_app_settings(session)
@@ -539,6 +574,7 @@ async def commit_artifact_and_advance(
     leave an artifact without state advancement or the reverse. Re-registering
     an existing ``(job_id, artifact_type, input_fingerprint)`` is a no-op.
     """
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None:
         raise KeyError(f"No job with id {job_id!r}")
@@ -638,6 +674,7 @@ async def renew_lease(
     lease_seconds: float,
 ) -> bool:
     """Renew a live lease; return False if the lease was lost."""
+    await _begin_immediate(session)
     result = await session.execute(
         update(Job)
         .where(
@@ -675,6 +712,7 @@ async def save_artifact_inline(
     payload_json: str,
 ) -> None:
     """Persist a checkpoint only while the caller still holds a live lease."""
+    await _begin_immediate(session)
     lease_guard = await session.execute(
         update(Job)
         .where(
@@ -719,6 +757,7 @@ async def mark_cancelled(
     now: float,
 ) -> Job:
     """Atomically transition a running job into ``cancelled``."""
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None:
         raise KeyError(f"No job with id {job_id!r}")
@@ -753,6 +792,7 @@ async def mark_cancelled(
 
 async def request_cancellation(session: AsyncSession, *, job_id: str, now: float) -> Job | None:
     """Cancel an idle job immediately or flag a running job for a safe-point stop."""
+    await _begin_immediate(session)
     job = await _get(session, job_id)
     if job is None:
         return None
@@ -795,6 +835,7 @@ async def activate_installation(
     session: AsyncSession, *, model_id: str, version: str, now: float
 ) -> ActiveModel:
     """Activate an installed version; fails without touching active if not installed."""
+    await _begin_immediate(session)
     install = await get_installation(session, model_id=model_id, version=version)
     if install is None:
         raise KeyError(f"cannot activate {model_id!r}/{version!r}: not installed")
@@ -826,6 +867,7 @@ async def complete_installation(
     revision bump on the operation) rolls back and leaves the previous active
     version untouched.
     """
+    await _begin_immediate(session)
     operation = await get_download_operation(session, operation_id=operation_id)
     if operation is None:
         raise KeyError(f"No download operation with id {operation_id!r}")
@@ -912,6 +954,7 @@ async def save_installation(
     session: AsyncSession, *, model_id: str, version: str, installed_path: str, now: float
 ) -> ModelInstall:
     """Record an installed model version; idempotent for the same (model, version)."""
+    await _begin_immediate(session)
     install = await get_installation(session, model_id=model_id, version=version)
     if install is None:
         install = ModelInstall(
@@ -949,6 +992,7 @@ async def create_download_operation(
     ``etag``/``last_modified`` may carry validators inherited from a prior attempt
     for the same (model, version), so a resume can send ``If-Range`` immediately.
     """
+    await _begin_immediate(session)
     operation = ModelDownload(
         operation_id=operation_id,
         model_id=model_id,
@@ -1022,6 +1066,7 @@ async def restart_download(
     partial is inconsistent with the recorded progress, or when the server
     ignored a Range request and the resource is being rewritten from zero.
     """
+    await _begin_immediate(session)
     operation = await get_download_operation(session, operation_id=operation_id)
     if operation is None:
         raise KeyError(f"No download operation with id {operation_id!r}")
@@ -1075,6 +1120,7 @@ async def advance_download_operation(
     Byte-count changes go through ``update_download_progress`` only; entering
     ``verifying`` requires the download to be complete.
     """
+    await _begin_immediate(session)
     operation = await get_download_operation(session, operation_id=operation_id)
     if operation is None:
         raise KeyError(f"No download operation with id {operation_id!r}")
@@ -1138,6 +1184,7 @@ async def update_download_progress(
 
     Only allowed while ``downloading``; never changes source/SHA/status/operation.
     """
+    await _begin_immediate(session)
     operation = await get_download_operation(session, operation_id=operation_id)
     if operation is None:
         raise KeyError(f"No download operation with id {operation_id!r}")
@@ -1197,6 +1244,7 @@ async def switch_download_source(
     are reset and the caller must truncate the on-disk partial before retrying.
     Allowed only while ``pending`` or ``downloading``.
     """
+    await _begin_immediate(session)
     operation = await get_download_operation(session, operation_id=operation_id)
     if operation is None:
         raise KeyError(f"No download operation with id {operation_id!r}")
@@ -1241,6 +1289,7 @@ async def uninstall_model(session: AsyncSession, *, model_id: str) -> list[str]:
     clears persisted state atomically so a crash cannot leave orphaned DB rows
     without directories or the reverse.
     """
+    await _begin_immediate(session)
     installs = list(
         (
             await session.scalars(

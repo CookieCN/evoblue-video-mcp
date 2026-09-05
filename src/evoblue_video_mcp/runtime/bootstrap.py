@@ -24,6 +24,7 @@ from evoblue_video_mcp.runtime.worker import StageHandler, run_worker_once
 from evoblue_video_mcp.storage import build_engine, init_db
 from evoblue_video_mcp.storage.artifact_store import ArtifactStore
 from evoblue_video_mcp.storage.models import AppSettings
+from evoblue_video_mcp.storage.rebuild import IndexRebuildService
 from evoblue_video_mcp.storage.repository import LeaseLostError, get_app_settings
 from evoblue_video_mcp.web.app import create_app
 
@@ -155,6 +156,16 @@ def create_runtime_app(
     credentials = credential_store or KeyringCredentialStore()
     handlers = handler_factory or ProductionHandlerFactory(paths, credentials, Path(model_dir))
     model_service = ModelManagerService(models_dir=model_dir, session_factory=session_factory)
+    report_pointer_file = paths.data / "report-root.txt"
+    index_rebuild_service = IndexRebuildService(
+        session_factory,
+        # Deleted-database self-heal (§4): the settings row (and its
+        # report_directory) dies with SQLite; recovery relies on
+        # out-of-database persistence — the pointer file (kept in sync by
+        # settings PUT) plus the platform reports dir as final fallback.
+        fallback_report_root=paths.default_reports,
+        pointer_file=report_pointer_file,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
@@ -169,6 +180,12 @@ def create_runtime_app(
             await reconcile_waiting_asr_jobs(
                 session, models_dir=model_dir, now=time.time()
             )
+        # Index reconciliation (§4): orphaned rebuild states, needs-rebuild
+        # self-heal, and the first-boot backfill run in the background so the
+        # API serves while the scan proceeds.
+        reconcile_task = asyncio.create_task(
+            index_rebuild_service.reconcile_on_startup()
+        )
         stop = asyncio.Event()
         worker = asyncio.create_task(
             run_runtime_worker_loop(
@@ -185,8 +202,12 @@ def create_runtime_app(
         finally:
             stop.set()
             worker.cancel()
+            reconcile_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker
+            with suppress(asyncio.CancelledError):
+                await reconcile_task
+            await index_rebuild_service.shutdown()
             await model_service.close()
             await engine.dispose()
 
@@ -195,5 +216,7 @@ def create_runtime_app(
         session_factory=session_factory,
         credential_store=credentials,
         model_service=model_service,
+        index_rebuild_service=index_rebuild_service,
+        report_pointer_file=report_pointer_file,
         lifespan=lifespan,
     )

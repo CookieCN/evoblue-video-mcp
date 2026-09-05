@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
@@ -242,6 +242,104 @@ async def _apply_v7(conn: AsyncConnection) -> None:
         )
 
 
+# P3 contract: docs/FTS5_SCHEMA.md §2 — these statements are transcribed
+# character-for-character from the frozen contract DDL blocks. A contract test
+# (tests/contract/test_p3_v8_ddl_drift.py) fails if the two ever diverge, so
+# edit the contract document first, then copy its blocks back here.
+_V8_STATEMENTS: list[str] = [
+    """
+CREATE TABLE report_documents (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    job_id VARCHAR(64) NOT NULL,
+    analysis_id VARCHAR(64) NOT NULL,
+    title TEXT NOT NULL,
+    platform VARCHAR(64) NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    video_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    published_at REAL,
+    analyzed_at REAL NOT NULL,
+    language VARCHAR(64) NOT NULL DEFAULT '',
+    summary_mode VARCHAR(32) NOT NULL DEFAULT '',
+    asr_provider VARCHAR(64) NOT NULL DEFAULT '',
+    asr_model VARCHAR(64) NOT NULL DEFAULT '',
+    asr_model_version VARCHAR(64) NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    summary_preview TEXT NOT NULL DEFAULT '',
+    relative_path TEXT NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    byte_size INTEGER,
+    doc_source VARCHAR(16) NOT NULL DEFAULT 'pipeline',
+    doc_status VARCHAR(16) NOT NULL DEFAULT 'active',
+    indexed_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+)
+""",
+    """
+CREATE UNIQUE INDEX ix_report_documents_job_id ON report_documents (job_id)
+""",
+    """
+CREATE UNIQUE INDEX ix_report_documents_analysis_id ON report_documents (analysis_id)
+""",
+    """
+CREATE INDEX ix_report_documents_analyzed_at ON report_documents (analyzed_at)
+""",
+    """
+CREATE VIRTUAL TABLE report_fts USING fts5(
+    title,
+    tags,
+    author,
+    summary,
+    transcript,
+    url,
+    tokenize='unicode61 remove_diacritics 2'
+)
+""",
+    """
+CREATE TABLE index_issues (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    issue_code VARCHAR(64) NOT NULL,
+    relative_path TEXT NOT NULL,
+    detail TEXT,
+    first_seen_at REAL NOT NULL,
+    last_seen_at REAL NOT NULL,
+    resolved_at REAL
+)
+""",
+    """
+CREATE UNIQUE INDEX uq_index_issues_open ON index_issues (issue_code, relative_path)
+WHERE resolved_at IS NULL
+""",
+    """
+CREATE INDEX ix_index_issues_open ON index_issues (resolved_at)
+""",
+    """
+CREATE TABLE index_status (
+    id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+    state VARCHAR(16) NOT NULL DEFAULT 'idle',
+    started_at REAL,
+    finished_at REAL,
+    scanned INTEGER NOT NULL DEFAULT 0,
+    indexed INTEGER NOT NULL DEFAULT 0,
+    unchanged INTEGER NOT NULL DEFAULT 0,
+    quarantined INTEGER NOT NULL DEFAULT 0,
+    duplicates INTEGER NOT NULL DEFAULT 0,
+    removed INTEGER NOT NULL DEFAULT 0,
+    purged INTEGER NOT NULL DEFAULT 0,
+    last_error_code VARCHAR(64)
+)
+""",
+    """
+INSERT INTO index_status (id, state) VALUES (1, 'idle')
+""",
+]
+
+
+async def _apply_v8(conn: AsyncConnection) -> None:
+    for statement in _V8_STATEMENTS:
+        await conn.execute(text(statement))
+
+
 _MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _apply_v1),
     (2, _apply_v2),
@@ -250,6 +348,7 @@ _MIGRATIONS: list[tuple[int, Migration]] = [
     (5, _apply_v5),
     (6, _apply_v6),
     (7, _apply_v7),
+    (8, _apply_v8),
 ]
 
 
@@ -257,10 +356,15 @@ def _now() -> float:
     return time.time()
 
 
-async def init_db(engine: AsyncEngine) -> None:
-    """Bring the database up to ``SCHEMA_VERSION``, no-oping when already there."""
+async def init_db(engine: AsyncEngine, *, target_version: int | None = None) -> None:
+    """Bring the database up to ``SCHEMA_VERSION``, no-oping when already there.
+
+    ``target_version`` caps how far the migration chain runs; it exists so tests
+    can materialize a genuine historical schema (e.g. v7) before upgrading.
+    Production callers must leave it unset. WAL mode is set per connection in
+    ``build_engine`` (it cannot switch from inside a transaction).
+    """
     async with engine.begin() as conn:
-        await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(
             text(
                 "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -273,6 +377,8 @@ async def init_db(engine: AsyncEngine) -> None:
 
         for version, migrate in _MIGRATIONS:
             if version <= applied:
+                continue
+            if target_version is not None and version > target_version:
                 continue
             await migrate(conn)
             await conn.execute(

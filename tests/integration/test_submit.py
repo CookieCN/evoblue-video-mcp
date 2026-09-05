@@ -1,9 +1,15 @@
 """Submit deduplicates on canonical URL within a reuse window (no network)."""
 
 import asyncio
+import sqlite3
+from pathlib import Path
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError as SQLOperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import evoblue_video_mcp.application.submit as submit_module
 from evoblue_video_mcp.application.submit import compute_request_fingerprint, submit_video
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.platforms.detector import detect_video
@@ -143,3 +149,71 @@ async def test_failed_job_is_not_reused(
         )
         assert reused is False
         assert job.job_id != "failed-job"
+
+
+async def test_immediate_lock_timeout_leaves_session_reusable(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P3-005 review P1-2: a timed-out BEGIN IMMEDIATE must not desync the
+    session. The lock holder keeps the write lock; submit fails on the busy
+    timeout; the SAME session then begins/commits its next transaction."""
+    # Hold the write lock from a separate driver connection (this test owns it).
+    lock = sqlite3.connect(str(tmp_path / "test.db"), timeout=30.0)
+    lock.execute("BEGIN IMMEDIATE")
+    lock.execute(
+        "INSERT INTO app_settings (id, setup_completed, updated_at) VALUES (99, 1, 1.0)"
+    )
+
+    lookup_calls: list[int] = []
+    original_lookup = submit_module._find_reusable
+
+    async def _spy_lookup(*args: object, **kwargs: object) -> object:
+        lookup_calls.append(1)
+        return await original_lookup(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(submit_module, "_find_reusable", _spy_lookup)
+
+    async with session_factory() as sess:
+        # The driver error surfaces either raw or SQLAlchemy-wrapped depending
+        # on where the busy timeout fires; catch both shapes.
+        with pytest.raises(
+            (sqlite3.OperationalError, SQLOperationalError), match="database is locked"
+        ):
+            await submit_video(
+                sess,
+                url="https://youtu.be/dQw4w9WgXcQ",
+                config_fingerprint="cfg",
+                now=1000.0,
+                reuse_window_seconds=3600.0,
+            )
+        # BEGIN IMMEDIATE failed BEFORE the lookup ran — proof the execution
+        # option reached the begin hook. A deferred BEGIN would have succeeded
+        # under the held lock and the failure would have happened later (after
+        # the lookup) at the INSERT.
+        assert lookup_calls == []
+
+        # Release the lock, then the SAME session must begin/commit cleanly.
+        lock.rollback()
+        lock.close()
+
+        job, reused = await submit_video(
+            sess,
+            url="https://youtu.be/dQw4w9WgXcQ",
+            config_fingerprint="cfg",
+            now=1000.5,
+            reuse_window_seconds=3600.0,
+        )
+        assert reused is False and job.status == JobStatus.QUEUED.value
+        assert len(lookup_calls) == 1  # the retried submit passed the lookup
+
+    # The failed submit must not have left a half-created job behind.
+    async with session_factory() as sess:
+        total = (await sess.execute(text("SELECT count(*) FROM jobs"))).scalar()
+        assert total == 1
+
+    # The failed submit must not have left a half-created job behind.
+    async with session_factory() as sess:
+        total = (await sess.execute(text("SELECT count(*) FROM jobs"))).scalar()
+        assert total == 1

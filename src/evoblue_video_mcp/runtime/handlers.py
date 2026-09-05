@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -21,13 +22,20 @@ from evoblue_video_mcp.llm.base import LLMError, LLMProvider
 from evoblue_video_mcp.platforms.base import SUBTITLE_MISSING, AdapterError, PlatformAdapter
 from evoblue_video_mcp.platforms.detector import PlatformError, detect_video
 from evoblue_video_mcp.platforms.models import Transcript, TranscriptSegment, VideoMetadata
+from evoblue_video_mcp.reports.parser import MarkdownParseError, decode_report_bytes
 from evoblue_video_mcp.reports.renderer import render_markdown
 from evoblue_video_mcp.reports.schema import ReportDocument
 from evoblue_video_mcp.reports.synthesis import SynthesisError, synthesize
 from evoblue_video_mcp.reports.writer import ReportConflictError, ReportWriter, report_filename
 from evoblue_video_mcp.runtime.worker import ArtifactRecord, StageContext, StageOutcome
 from evoblue_video_mcp.storage.artifact_store import ArtifactIntegrityError, ArtifactStore
+from evoblue_video_mcp.storage.db import immediate_write_transaction
 from evoblue_video_mcp.storage.models import Job
+from evoblue_video_mcp.storage.report_repository import (
+    FtsBodyTexts,
+    ReportIndexEntry,
+    upsert_report_document,
+)
 from evoblue_video_mcp.storage.repository import (
     get_artifact,
     get_installations,
@@ -278,16 +286,24 @@ class TranscribingHandler:
         except ValueError as exc:
             return StageOutcome.fatal("ASR_LANGUAGE_UNSUPPORTED", error_detail=str(exc))
 
-        await pin_job_asr_route(
-            session,
-            job_id=job.job_id,
-            owner=ctx.owner,
-            now=ctx.now(),
-            provider_id=decision.provider_id,
-            model_id=decision.model_id,
-            model_version=decision.model_version,
-            recommendation_model_id=decision.model_id if decision.recommendation else None,
-        )
+        # §6: _provider_options above opened a deferred read snapshot and the
+        # pin reads then writes — as an IMMEDIATE transaction a concurrent
+        # writer committing in between degrades to the busy timeout instead
+        # of an unretryable BUSY_SNAPSHOT (which the worker would convert
+        # into a spurious INTERNAL_ERROR). The read transaction is closed
+        # explicitly first: the write helper refuses an open transaction.
+        await session.commit()
+        async with immediate_write_transaction(session):
+            await pin_job_asr_route(
+                session,
+                job_id=job.job_id,
+                owner=ctx.owner,
+                now=ctx.now(),
+                provider_id=decision.provider_id,
+                model_id=decision.model_id,
+                model_version=decision.model_version,
+                recommendation_model_id=decision.model_id if decision.recommendation else None,
+            )
         if not decision.installed:
             return StageOutcome.success(target=JobStatus.WAITING_FOR_MODEL)
 
@@ -644,10 +660,12 @@ class GeneratingReportHandler:
 
 
 class IndexingHandler:
-    """Verify the generated report and complete the job (FTS indexing arrives in P3).
+    """Verify the generated report, index it, and complete the job.
 
-    P2's ``completed`` means a Markdown report was generated and its file is
-    intact. FTS5 indexing is a P3 concern; this stage does not pretend to index.
+    The report file is read back, parsed with the frozen Schema v1 parser, and
+    written into ``report_documents`` + ``report_fts`` through the pairing
+    repository (docs/FTS5_SCHEMA.md §5). The transaction is committed here —
+    the repository functions never commit on their own.
     """
 
     def __init__(self, writer: ReportWriter) -> None:
@@ -661,12 +679,67 @@ class IndexingHandler:
             artifact_type=REPORT_ARTIFACT_TYPE,
             input_fingerprint=fingerprint,
         )
-        if artifact is None or artifact.relative_path is None or artifact.content_hash is None:
+        if (
+            artifact is None
+            or artifact.relative_path is None
+            or artifact.content_hash is None
+        ):
             return StageOutcome.fatal("INTERNAL_ERROR", error_detail="missing report artifact")
         try:
-            await self._writer.read_file_verified(artifact.relative_path, artifact.content_hash)
+            content = await self._writer.read_file_verified(
+                artifact.relative_path, artifact.content_hash
+            )
         except ArtifactIntegrityError as exc:
             return StageOutcome.fatal("INDEX_FAILED", error_detail=str(exc))
+        try:
+            parsed = decode_report_bytes(content.encode("utf-8"))
+        except MarkdownParseError as exc:
+            # The pipeline wrote this file itself; an unparseable report is an
+            # internal defect, not a retryable condition.
+            return StageOutcome.fatal(
+                "INDEX_PARSE_FAILED", error_detail=f"{exc.code}: {exc}"
+            )
+        entry = ReportIndexEntry(
+            job_id=job.job_id,
+            analysis_id=parsed.analysis_id,
+            title=parsed.title,
+            platform=parsed.platform,
+            author=parsed.author,
+            video_id=parsed.video_id,
+            source_url=parsed.source_url,
+            published_at=(
+                parsed.published_at.timestamp() if parsed.published_at else None
+            ),
+            analyzed_at=parsed.analyzed_at.timestamp(),
+            summary_mode=parsed.summary_mode,
+            language=parsed.language,
+            asr_provider=parsed.asr_provider,
+            asr_model=parsed.asr_model,
+            asr_model_version=parsed.asr_model_version,
+            tags=parsed.tags,
+            summary_preview=parsed.core_summary[:200],
+            relative_path=artifact.relative_path,
+            content_hash=artifact.content_hash,
+            byte_size=artifact.byte_size,
+            doc_source="pipeline",
+        )
+        # BUSY_SNAPSHOT guard (§6): get_artifact above opened a deferred read
+        # transaction — closed explicitly before the write (the helper
+        # refuses an open transaction); the index write then runs as
+        # IMMEDIATE so a concurrent writer (rescan batch, settings save)
+        # committing in between cannot kill this flush with an unretryable
+        # snapshot conflict.
+        await session.commit()
+        async with immediate_write_transaction(session):
+            await upsert_report_document(
+                session,
+                entry=entry,
+                body=FtsBodyTexts(
+                    summary=parsed.core_summary,
+                    transcript=parsed.transcript or "",
+                ),
+                now=time.time(),
+            )
         return StageOutcome.success(target=JobStatus.COMPLETED)
 
 

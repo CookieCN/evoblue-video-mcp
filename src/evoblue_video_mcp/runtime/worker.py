@@ -15,6 +15,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp.jobs import TERMINAL_JOB_STATUSES, JobStatus
+from evoblue_video_mcp.storage.db import immediate_write_transaction
 from evoblue_video_mcp.storage.models import Job
 from evoblue_video_mcp.storage.repository import (
     LeaseLostError,
@@ -118,7 +119,13 @@ async def run_worker_once(
     """Claim one job and drive it through its stages; returns the job or ``None`` if idle."""
     now = now_fn or time.time
     async with session_factory() as sess:
-        job = await claim_next_job(sess, owner=owner, lease_seconds=lease_seconds, now=now())
+        # The claim reads then writes — as an IMMEDIATE write it cannot die
+        # on a BUSY_SNAPSHOT when another writer (startup reconciliation,
+        # rescan) commits in between (see db.immediate_write_transaction).
+        async with immediate_write_transaction(sess):
+            job = await claim_next_job(
+                sess, owner=owner, lease_seconds=lease_seconds, now=now()
+            )
         if job is None:
             return None
         job_id = job.job_id
@@ -167,15 +174,16 @@ async def run_worker_once(
                 if handler is None:
                     heartbeat_stop.set()
                     await heartbeat
-                    await mark_failure(
-                        sess,
-                        job_id=job.job_id,
-                        owner=owner,
-                        now=now(),
-                        error_code=MISSING_HANDLER_ERROR,
-                        retryable=False,
-                        error_detail=f"no handler for stage {status.value}",
-                    )
+                    async with immediate_write_transaction(sess):
+                        await mark_failure(
+                            sess,
+                            job_id=job.job_id,
+                            owner=owner,
+                            now=now(),
+                            error_code=MISSING_HANDLER_ERROR,
+                            retryable=False,
+                            error_detail=f"no handler for stage {status.value}",
+                        )
                     break
 
                 # Claim/get operations leave a read transaction open. Close it before
@@ -187,81 +195,89 @@ async def run_worker_once(
                     heartbeat_stop.set()
                     await heartbeat
                     # CancelledError is not an Exception, so shutdown still propagates.
-                    await mark_failure(
-                        sess,
-                        job_id=job.job_id,
-                        owner=owner,
-                        now=now(),
-                        error_code="INTERNAL_ERROR",
-                        retryable=False,
-                        error_detail=_sanitize_error(exc),
-                    )
+                    await sess.rollback()  # discard the handler's failed transaction
+                    async with immediate_write_transaction(sess):
+                        await mark_failure(
+                            sess,
+                            job_id=job.job_id,
+                            owner=owner,
+                            now=now(),
+                            error_code="INTERNAL_ERROR",
+                            retryable=False,
+                            error_detail=_sanitize_error(exc),
+                        )
                     break
                 heartbeat_stop.set()
                 await heartbeat
                 await sess.refresh(job)
 
                 if outcome.error_code == "CANCELLED_BY_USER":
-                    await mark_cancelled(sess, job_id=job.job_id, owner=owner, now=now())
+                    async with immediate_write_transaction(sess):
+                        await mark_cancelled(
+                            sess, job_id=job.job_id, owner=owner, now=now()
+                        )
                     break
 
                 if outcome.error_code is not None:
                     next_retry_at = outcome.next_retry_at
                     if next_retry_at is None and outcome.retryable:
                         next_retry_at = now() + DEFAULT_RETRY_DELAY
-                    await mark_failure(
-                        sess,
-                        job_id=job.job_id,
-                        owner=owner,
-                        now=now(),
-                        error_code=outcome.error_code,
-                        retryable=outcome.retryable,
-                        next_retry_at=next_retry_at,
-                        error_detail=outcome.error_detail,
-                    )
+                    async with immediate_write_transaction(sess):
+                        await mark_failure(
+                            sess,
+                            job_id=job.job_id,
+                            owner=owner,
+                            now=now(),
+                            error_code=outcome.error_code,
+                            retryable=outcome.retryable,
+                            next_retry_at=next_retry_at,
+                            error_detail=outcome.error_detail,
+                        )
                     break
 
                 if outcome.target is None:
-                    await mark_failure(
-                        sess,
-                        job_id=job.job_id,
-                        owner=owner,
-                        now=now(),
-                        error_code=MISSING_HANDLER_ERROR,
-                        retryable=False,
-                        error_detail="handler returned no target",
-                    )
+                    async with immediate_write_transaction(sess):
+                        await mark_failure(
+                            sess,
+                            job_id=job.job_id,
+                            owner=owner,
+                            now=now(),
+                            error_code=MISSING_HANDLER_ERROR,
+                            retryable=False,
+                            error_detail="handler returned no target",
+                        )
                     break
 
-                if outcome.artifact is not None:
-                    job = await commit_artifact_and_advance(
-                        sess,
-                        job_id=job.job_id,
-                        owner=owner,
-                        to_status=outcome.target,
-                        now=now(),
-                        lease_seconds=lease_seconds,
-                        progress=outcome.progress,
-                        stage=outcome.artifact.stage,
-                        artifact_type=outcome.artifact.artifact_type,
-                        input_fingerprint=outcome.artifact.input_fingerprint,
-                        schema_version=outcome.artifact.schema_version,
-                        storage_kind=outcome.artifact.storage_kind,
-                        payload_json=outcome.artifact.payload_json,
-                        relative_path=outcome.artifact.relative_path,
-                        content_hash=outcome.artifact.content_hash,
-                        byte_size=outcome.artifact.byte_size,
-                    )
-                else:
-                    job = await advance_job(
-                        sess,
-                        job_id=job.job_id,
-                        owner=owner,
-                        to_status=outcome.target,
-                        now=now(),
-                        lease_seconds=lease_seconds,
-                        progress=outcome.progress,
-                    )
+                async with immediate_write_transaction(sess):
+                    if outcome.artifact is not None:
+                        job = await commit_artifact_and_advance(
+                            sess,
+                            job_id=job.job_id,
+                            owner=owner,
+                            to_status=outcome.target,
+                            now=now(),
+                            lease_seconds=lease_seconds,
+                            progress=outcome.progress,
+                            stage=outcome.artifact.stage,
+                            artifact_type=outcome.artifact.artifact_type,
+                            input_fingerprint=outcome.artifact.input_fingerprint,
+                            schema_version=outcome.artifact.schema_version,
+                            storage_kind=outcome.artifact.storage_kind,
+                            payload_json=outcome.artifact.payload_json,
+                            relative_path=outcome.artifact.relative_path,
+                            content_hash=outcome.artifact.content_hash,
+                            byte_size=outcome.artifact.byte_size,
+                        )
+                    else:
+                        job = await advance_job(
+                            sess,
+                            job_id=job.job_id,
+                            owner=owner,
+                            to_status=outcome.target,
+                            now=now(),
+                            lease_seconds=lease_seconds,
+                            progress=outcome.progress,
+                        )
                 if JobStatus(job.status) is JobStatus.WAITING_FOR_MODEL:
                     break
                 heartbeat_stop = asyncio.Event()

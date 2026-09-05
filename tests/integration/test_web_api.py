@@ -265,3 +265,86 @@ async def test_submit_job_rejects_invalid_url(
     async with _client(session_factory) as client:
         resp = await client.post("/api/jobs", json={"url": "not-a-url"})
         assert resp.status_code == 422
+
+async def test_cancel_survives_concurrent_writer_commit(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Review P1: the cancel endpoint is a read-then-write path — its write
+    must run as BEGIN IMMEDIATE. Falsified both ways:
+
+    * guard ACTIVE: a concurrent writer committing while the request is in
+      flight cannot kill the cancel (200, job cancelled);
+    * guard NEUTERED (deferred — the old behavior): the SAME interleaving
+      dies on the unretryable BUSY_SNAPSHOT (500).
+
+    The concurrent commit is injected between the job READ and the UPDATE via
+    a spy around ``request_cancellation``.
+    """
+    import sqlite3
+    from contextlib import asynccontextmanager
+
+    import evoblue_video_mcp.web.app as web_app_module
+    from evoblue_video_mcp.storage.repository import _get
+
+    original = web_app_module.request_cancellation
+
+    async with session_factory() as sess:
+        await _enqueue(sess, job_id="cancel-race")
+
+    async def spy_read_then_concurrent_commit(session, **kwargs):
+        # The READ opens the (would-be deferred) snapshot...
+        await _get(session, job_id=kwargs["job_id"])
+        # ...while it is open, ANOTHER writer commits. A deferred read never
+        # blocks this writer; under IMMEDIATE the writer waits for OUR lock
+        # instead, bounded by its own (short) timeout — and loses.
+        conn = sqlite3.connect(str(tmp_path / "test.db"), timeout=0.5)
+        try:
+            conn.execute(
+                "UPDATE index_status SET started_at = COALESCE(started_at, 0) + 1 "
+                "WHERE id = 1"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # guard active: the concurrent writer waits and loses
+        finally:
+            conn.close()
+        return await original(session, **kwargs)
+
+    @asynccontextmanager
+    async def no_guard(session):  # neutered guard = the old deferred behavior
+        yield
+
+    async def run_cancel(job_id: str) -> httpx.Response:
+        app = create_app(session_factory=session_factory)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as client:
+            return await client.post(f"/api/jobs/{job_id}/cancel")
+
+    # 1. Guard ACTIVE: the interleaving survives.
+    monkeypatch.setattr(web_app_module, "request_cancellation", spy_read_then_concurrent_commit)
+    resp = await run_cancel("cancel-race")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == JobStatus.CANCELLED.value
+
+    # 2. Guard NEUTERED: the SAME interleaving kills the request. Both layers
+    #    must be neutered — the endpoint guard AND the repository writer's own
+    #    _begin_immediate (the function is self-governing by design).
+    import evoblue_video_mcp.storage.repository as repository_module
+
+    async def _no_immediate(session):
+        pass
+
+    async with session_factory() as sess:
+        await _enqueue(sess, job_id="cancel-race-2")
+    monkeypatch.setattr(web_app_module, "immediate_write_transaction", no_guard)
+    monkeypatch.setattr(repository_module, "_begin_immediate", _no_immediate)
+    # Starlette's ServerErrorMiddleware re-raises after the 500, so under the
+    # raw ASGI transport the OperationalError surfaces to the caller.
+    import sqlalchemy.exc
+
+    with pytest.raises(sqlalchemy.exc.OperationalError):
+        await run_cancel("cancel-race-2")
+    monkeypatch.undo()

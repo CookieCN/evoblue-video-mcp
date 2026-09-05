@@ -28,6 +28,10 @@ from evoblue_video_mcp.runtime.handlers import (
 from evoblue_video_mcp.runtime.worker import run_worker_once
 from evoblue_video_mcp.storage.artifact_store import ArtifactStore
 from evoblue_video_mcp.storage.models import JobArtifact
+from evoblue_video_mcp.storage.report_repository import (
+    get_report_document,
+    verify_fts,
+)
 
 
 def _now() -> float:
@@ -202,3 +206,54 @@ def test_build_handlers_assembles_full_set(tmp_path) -> None:
         JobStatus.GENERATING_REPORT,
         JobStatus.INDEXING,
     }
+
+
+async def test_indexing_stage_writes_report_index(
+    tmp_path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """P3-006: the INDEXING stage parses the report file and lands a paired
+    report_documents + report_fts row (pipeline doc_source)."""
+    store = ArtifactStore(tmp_path / "artifacts")
+    writer = ReportWriter(tmp_path / "reports")
+    llm = _PipelineLLM()
+
+    handlers = {
+        JobStatus.FETCHING_METADATA: FetchingMetadataHandler(_FakeAdapter()),
+        JobStatus.FETCHING_SUBTITLES: FetchingSubtitlesHandler(_FakeAdapter(), store),
+        JobStatus.CLEANING_TRANSCRIPT: CleaningTranscriptHandler(store),
+        JobStatus.CHUNKING: ChunkingHandler(store),
+        JobStatus.SUMMARIZING_CHUNKS: SummarizingChunksHandler(store, llm),
+        JobStatus.GENERATING_REPORT: GeneratingReportHandler(store, writer, llm),
+        JobStatus.INDEXING: IndexingHandler(writer),
+    }
+
+    async with session_factory() as sess:
+        _, reused = await submit_video(
+            sess,
+            url="https://youtu.be/dQw4w9WgXcQ",
+            config_fingerprint="cfg",
+            now=1000.0,
+            reuse_window_seconds=3600.0,
+        )
+        assert reused is False
+
+    job = await run_worker_once(
+        session_factory, owner="w1", lease_seconds=30.0, now_fn=_now, handlers=handlers
+    )
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED.value
+
+    async with session_factory() as sess:
+        record = await get_report_document(sess, job_id=job.job_id)
+        assert record is not None
+        assert record.analysis_id == job.job_id  # Markdown Schema v1 identity
+        assert record.title == "Test"
+        assert record.platform == "youtube"
+        assert record.summary_mode in ("auto", "standard", "unboxing")
+        assert record.doc_source == "pipeline"
+        assert record.doc_status == "active"
+        assert record.content_hash  # sha-256 recorded from the artifact
+        verification = await verify_fts(sess)
+        assert verification.consistent
+        assert (verification.document_count, verification.fts_row_count) == (1, 1)

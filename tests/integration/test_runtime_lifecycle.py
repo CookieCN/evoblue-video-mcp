@@ -285,7 +285,9 @@ async def test_provider_load_failure_does_not_block_engine_or_other_tiers(
                 now=1.0,
             )
             job.asr_recommendation_model_id = model_id
-        await session.commit()
+            # enqueue_job owns its transaction (BEGIN IMMEDIATE §6): pending
+            # caller changes must be resolved BEFORE the next writer runs.
+            await session.commit()
     await engine.dispose()
 
     app = create_runtime_app(

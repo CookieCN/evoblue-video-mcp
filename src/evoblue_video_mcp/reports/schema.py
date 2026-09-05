@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 class ReportDocument(BaseModel):
@@ -31,3 +31,11 @@ class ReportDocument(BaseModel):
     comment_sentiment: str = ""
     video_information: str = ""
     transcript: str | None = None
+
+    @field_validator("published_at", "analyzed_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        """Markdown Schema v1 mandates tz-aware datetimes (see docs/MARKDOWN_SCHEMA.md)."""
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("datetime must be timezone-aware (RFC 3339 with offset)")
+        return value

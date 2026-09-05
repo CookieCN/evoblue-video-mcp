@@ -1,14 +1,20 @@
 """Local Engine FastAPI factory."""
 
 import asyncio
+import logging
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from pathlib import Path
 from typing import Literal, TypedDict
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.params import Depends as DependsParam
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
@@ -17,7 +23,32 @@ from evoblue_video_mcp.asr.service import ModelManagerService, ModelSummary
 from evoblue_video_mcp.config import CredentialStore, Settings, llm_credential_reference
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.platforms.detector import PlatformError
+from evoblue_video_mcp.reports.parser import (
+    MarkdownParseError,
+    ParsedReport,
+    frontmatter_block,
+    parse_markdown_report,
+)
+from evoblue_video_mcp.storage.db import immediate_write_transaction
+from evoblue_video_mcp.storage.fts import QueryInvalidError, build_match_query
 from evoblue_video_mcp.storage.models import Job
+from evoblue_video_mcp.storage.rebuild import (
+    IndexRebuildService,
+    RebuildRootUnavailable,
+    read_report_pointer,
+    resolve_report_root,
+    write_report_pointer,
+)
+from evoblue_video_mcp.storage.report_repository import (
+    ReportDocumentRecord,
+    count_index_issues,
+    count_open_issues,
+    get_index_status,
+    get_report_document,
+    list_open_issues,
+    list_report_documents,
+    search_reports,
+)
 from evoblue_video_mcp.storage.repository import (
     get_app_settings,
     get_job,
@@ -28,21 +59,63 @@ from evoblue_video_mcp.storage.repository import (
 from evoblue_video_mcp.web.schemas import (
     AppSettingsResponse,
     AppSettingsUpdate,
+    HistoryDetailResponse,
+    HistoryItem,
+    HistoryListResponse,
+    IndexIssueItem,
+    IndexIssuesResponse,
+    IndexRebuildAcceptedResponse,
+    IndexRebuildRequest,
+    IndexStatusResponse,
     JobDetailResponse,
     JobListItem,
     JobListResponse,
     ModelListResponse,
     ModelSummaryResponse,
+    RebuildCounters,
+    ReportContentResponse,
+    SearchHit,
+    SearchResponse,
     SubmitJobInput,
     SubmitJobResponse,
     UninstallResponse,
 )
+
+#: Frozen response character cap for report sections (HISTORY_SEARCH_API §3).
+_REPORT_SECTION_CAP = 50_000
+
+logger = logging.getLogger(__name__)
+
+#: P3 endpoints use the structured error envelope — including FastAPI's
+#: pre-endpoint parameter validation, which would otherwise emit the legacy
+#: ``{"detail": ...}`` shape (HISTORY_SEARCH_API §0).
+_P3_ENVELOPE_PREFIXES = ("/api/history", "/api/search", "/api/index")
 
 
 class HealthResponse(TypedDict):
     status: Literal["ok"]
     service: str
     version: str
+
+
+class HistoryApiError(Exception):
+    """P3 endpoint failure carrying the frozen ``{"error": {...}}`` envelope."""
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+
+
+def _local_token_dependency(token: str) -> Callable[[str | None], Awaitable[None]]:
+    async def require_local_token(x_local_token: str | None = Header(default=None)) -> None:
+        if not token:
+            return
+        if x_local_token is None or not secrets.compare_digest(x_local_token, token):
+            raise HTTPException(status_code=401, detail="invalid local access token")
+
+    return require_local_token
 
 
 def _to_list_item(job: Job) -> JobListItem:
@@ -82,14 +155,18 @@ def create_app(
     local_token: str | None = None,
     credential_store: CredentialStore | None = None,
     model_service: ModelManagerService | None = None,
+    index_rebuild_service: IndexRebuildService | None = None,
+    report_pointer_file: Path | None = None,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
     """Create the Local Engine HTTP application.
 
     Data endpoints attach when a session factory is given; model-management
-    endpoints attach when a ``model_service`` is also given. When ``local_token``
-    (or ``Settings.local_access_token``) is set, data endpoints require it via the
-    ``X-Local-Token`` header; ``/api/health`` stays token-exempt.
+    endpoints attach when a ``model_service`` is also given; index-rebuild
+    endpoints attach when an ``index_rebuild_service`` is also given. When
+    ``local_token`` (or ``Settings.local_access_token``) is set, data endpoints
+    require it via the ``X-Local-Token`` header; ``/api/health`` stays
+    token-exempt.
     """
     app_settings = settings or Settings()
     token = local_token if local_token is not None else app_settings.local_access_token
@@ -97,12 +174,49 @@ def create_app(
         raise RuntimeError("local access token is required in production")
     app = FastAPI(title=app_settings.app_name, version=__version__, lifespan=lifespan)
 
+    @app.exception_handler(HistoryApiError)
+    async def _history_api_error_handler(
+        request: Request, exc: HistoryApiError
+    ) -> JSONResponse:
+        # Frozen P3 error envelope (docs/HISTORY_SEARCH_API.md §0).
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        # Parameter type errors (e.g. limit=abc, open=maybe) are rejected by
+        # FastAPI BEFORE the endpoint runs — P3 routes must still answer in the
+        # frozen envelope; legacy endpoints keep FastAPI's default shape.
+        if request.url.path.startswith(_P3_ENVELOPE_PREFIXES):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "INVALID_FILTER",
+                        "message": "invalid query parameters",
+                    }
+                },
+            )
+        return JSONResponse(
+            status_code=422, content={"detail": jsonable_encoder(exc.errors())}
+        )
+
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return {"status": "ok", "service": app_settings.app_name, "version": __version__}
 
     if session_factory is not None:
-        _register_data_endpoints(app, session_factory, token, credential_store, model_service)
+        _register_data_endpoints(
+            app, session_factory, token, credential_store, model_service,
+            report_pointer_file,
+        )
+        _register_history_endpoints(
+            app, session_factory, token, index_rebuild_service
+        )
 
     return app
 
@@ -113,6 +227,7 @@ def _register_data_endpoints(
     token: str,
     credential_store: CredentialStore | None,
     model_service: ModelManagerService | None,
+    report_pointer_file: Path | None = None,
 ) -> None:
     async def credential_is_configured(reference: str | None) -> bool:
         if credential_store is None or reference is None:
@@ -122,13 +237,16 @@ def _register_data_endpoints(
         except Exception:
             return False
 
-    async def require_local_token(x_local_token: str | None = Header(default=None)) -> None:
-        if not token:
-            return
-        if x_local_token is None or not secrets.compare_digest(x_local_token, token):
-            raise HTTPException(status_code=401, detail="invalid local access token")
+    dependencies = [Depends(_local_token_dependency(token))] if token else []
 
-    dependencies = [Depends(require_local_token)] if token else []
+    # §4 dual-write discipline for report_directory: "read current → write
+    # recovery pointer → commit database" is SERIALIZED in-process (two
+    # concurrent PUTs must not interleave into pointer=B / database=A) and
+    # COMPENSATED (a database failure restores the previous pointer, so a 503
+    # never leaves the pointer ahead of the database). Two stores cannot be
+    # made atomic; this bounds the divergence to a compensated-then-failed
+    # double fault, which logs loudly.
+    settings_write_lock = asyncio.Lock()
 
     @app.get("/api/jobs", response_model=JobListResponse, dependencies=dependencies)
     async def jobs_list(
@@ -159,7 +277,12 @@ def _register_data_endpoints(
         dependencies=dependencies,
     )
     async def job_cancel(job_id: str) -> JobDetailResponse:
-        async with session_factory() as sess:
+        # §6: the cancel reads the job then writes — as an IMMEDIATE
+        # transaction, a concurrent writer committing in between degrades
+        # to the busy timeout instead of an unretryable BUSY_SNAPSHOT (P4
+        # brings concurrent MCP clients cancelling while the worker
+        # writes).
+        async with session_factory() as sess, immediate_write_transaction(sess):
             job = await request_cancellation(sess, job_id=job_id, now=time.time())
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
@@ -184,9 +307,10 @@ def _register_data_endpoints(
 
     @app.put("/api/settings", response_model=AppSettingsResponse, dependencies=dependencies)
     async def settings_put(payload: AppSettingsUpdate) -> AppSettingsResponse:
-        async with session_factory() as sess:
-            current = await get_app_settings(sess)
-            fields = payload.model_fields_set
+        fields = payload.model_fields_set
+        async with settings_write_lock:
+            async with session_factory() as sess:
+                current = await get_app_settings(sess)
             provider = (
                 payload.llm_provider
                 if "llm_provider" in fields
@@ -212,42 +336,129 @@ def _register_data_endpoints(
                     raise HTTPException(
                         status_code=503, detail="credential store unavailable"
                     ) from exc
-            saved = await save_app_settings(
-                sess,
-                setup_completed=(
-                    payload.setup_completed
-                    if payload.setup_completed is not None
-                    else (current.setup_completed if current else False)
-                ),
-                now=time.time(),
-                report_directory=(
-                    payload.report_directory
-                    if "report_directory" in fields
-                    else (current.report_directory if current else None)
-                ),
-                llm_provider=provider,
-                llm_base_url=(
-                    payload.llm_base_url
-                    if "llm_base_url" in fields
-                    else (current.llm_base_url if current else None)
-                ),
-                llm_model=(
-                    payload.llm_model
-                    if "llm_model" in fields
-                    else (current.llm_model if current else None)
-                ),
-                llm_credential_ref=credential_ref,
-                asr_provider=(
-                    payload.asr_provider
-                    if "asr_provider" in fields
-                    else ((current.asr_provider if current else None) or "auto")
-                ),
-                whisper_cpp_executable=(
-                    payload.whisper_cpp_executable
-                    if "whisper_cpp_executable" in fields
-                    else (current.whisper_cpp_executable if current else None)
-                ),
+            report_directory_value = (
+                payload.report_directory
+                if "report_directory" in fields
+                else (current.report_directory if current else None)
             )
+            pointer_dir = (
+                report_pointer_file.parent
+                if report_pointer_file is not None and "report_directory" in fields
+                else None
+            )
+            pointer_value = (
+                Path(report_directory_value) if report_directory_value else None
+            )
+            previous_pointer: Path | None = None
+
+            def _restore_pointer() -> None:
+                """Put the pointer back to its pre-request value — inline (no
+                thread): with the inline write above this is an indivisible
+                critical section on this event loop, so a cancellation can
+                never land between the replace and the restore, and a
+                cancelled ``to_thread`` can never surface a late replace that
+                re-overwrites the restored pointer."""
+                if pointer_dir is None:
+                    return
+                try:
+                    write_report_pointer(pointer_dir, previous_pointer)
+                except OSError:
+                    logger.error(
+                        "report pointer compensation failed after a failed "
+                        "settings save: OSError "
+                        "(code=REPORT_POINTER_COMPENSATION_FAILED)"
+                    )
+
+            if pointer_dir is not None:
+                # §4 dual-write policy: the recovery pointer goes FIRST
+                # (atomically) — by the time the API answers success, pointer
+                # and database agree. A pointer failure aborts the whole save
+                # (503) with the database untouched; the reverse ordering
+                # would let the database adopt a directory the recovery
+                # pointer does not know — a split-brain that only surfaces
+                # after SQLite deletion. Clearing writes an empty tombstone
+                # through the same atomic path, and ANY pointer failure
+                # (including a failed clear) refuses the database commit — a
+                # silently cleared pointer would let a stale directory revive
+                # after the database is deleted.
+                try:
+                    previous_pointer = read_report_pointer(pointer_dir)
+                except RebuildRootUnavailable as exc:
+                    raise HTTPException(
+                        status_code=503, detail="report pointer could not be read"
+                    ) from exc
+                # Inline write (not ``to_thread``): see _restore_pointer — a
+                # cancelled thread would keep running and could re-overwrite
+                # the compensated pointer AFTER the restore. Settings saves
+                # are low-frequency; the brief fsync on the event loop is the
+                # price of the indivisible critical section.
+                try:
+                    write_report_pointer(pointer_dir, pointer_value)
+                except OSError as exc:
+                    raise HTTPException(
+                        status_code=503, detail="report pointer could not be updated"
+                    ) from exc
+            try:
+                # §6: reads-then-writes run as BEGIN IMMEDIATE so a
+                # concurrent writer committing in between cannot kill the
+                # save with an unretryable BUSY_SNAPSHOT.
+                #
+                # §4 exact compensation: ``commit=False`` keeps the commit in
+                # THIS transaction, as the LAST statement before the context
+                # exits — there is no post-commit await left inside the try.
+                # Therefore reaching the handlers below PROVES the database
+                # did not adopt the value, and restoring the pointer is
+                # always correct; a failure AFTER the commit (reconcile,
+                # response encoding) never enters these handlers, so the
+                # stores can never be pushed apart by compensation itself.
+                async with session_factory() as sess, immediate_write_transaction(sess):
+                    saved = await save_app_settings(
+                        sess,
+                        setup_completed=(
+                            payload.setup_completed
+                            if payload.setup_completed is not None
+                            else (current.setup_completed if current else False)
+                        ),
+                        now=time.time(),
+                        report_directory=report_directory_value,
+                        llm_provider=provider,
+                        llm_base_url=(
+                            payload.llm_base_url
+                            if "llm_base_url" in fields
+                            else (current.llm_base_url if current else None)
+                        ),
+                        llm_model=(
+                            payload.llm_model
+                            if "llm_model" in fields
+                            else (current.llm_model if current else None)
+                        ),
+                        llm_credential_ref=credential_ref,
+                        asr_provider=(
+                            payload.asr_provider
+                            if "asr_provider" in fields
+                            else ((current.asr_provider if current else None) or "auto")
+                        ),
+                        whisper_cpp_executable=(
+                            payload.whisper_cpp_executable
+                            if "whisper_cpp_executable" in fields
+                            else (current.whisper_cpp_executable if current else None)
+                        ),
+                        commit=False,
+                    )
+            except asyncio.CancelledError:
+                # A PUT cancelled between the pointer replace and the database
+                # commit must not leave the pointer ahead of the database (§4)
+                # — compensation covers CANCELLATION, then the cancel
+                # propagates.
+                _restore_pointer()
+                raise
+            except Exception as exc:
+                # The database did NOT adopt the value: put the pointer back
+                # so the stores cannot diverge behind a 503 (§4).
+                _restore_pointer()
+                raise HTTPException(
+                    status_code=503, detail="settings could not be saved"
+                ) from exc
         if "whisper_cpp_executable" in fields and model_service is not None:
             # A newly usable CLI can unblock jobs parked on a whisper
             # recommendation; provider registration and the resume both happen
@@ -373,3 +584,342 @@ def _register_model_endpoints(
             reclaimed_bytes=result.reclaimed_bytes,
             pending_reclaim_bytes=result.pending_reclaim_bytes,
         )
+def _to_history_item(record: ReportDocumentRecord) -> HistoryItem:
+    return HistoryItem(
+        job_id=record.job_id,
+        analysis_id=record.analysis_id,
+        title=record.title,
+        platform=record.platform,
+        author=record.author,
+        video_id=record.video_id,
+        source_url=record.source_url,
+        published_at=record.published_at,
+        analyzed_at=record.analyzed_at,
+        language=record.language,
+        summary_mode=record.summary_mode,
+        asr_provider=record.asr_provider,
+        asr_model=record.asr_model,
+        asr_model_version=record.asr_model_version,
+        tags=list(record.tags),
+        summary_preview=record.summary_preview,
+        file_path=record.relative_path,
+        content_hash=record.content_hash,
+        doc_status=record.doc_status,
+        indexed_at=record.indexed_at,
+    )
+
+
+async def _read_report_text(
+    session_factory: async_sessionmaker[AsyncSession],
+    index_rebuild_service: IndexRebuildService | None,
+    record: ReportDocumentRecord,
+) -> tuple[str | None, str | None]:
+    """Read the report file's CURRENT content (HISTORY_SEARCH_API §3); no hash
+    enforcement — drift is the rebuild's concern. Returns ``(text, abs_path)``;
+    ``(None, None)`` when the file is gone.
+
+    The root uses the SAME §4 resolver as the rebuild engine (settings →
+    pointer file → fallback): after a deleted-database recovery the settings
+    row is gone, and the recovered index must be fully READABLE — history
+    detail and section content — not merely listed and searchable.
+    """
+    try:
+        if index_rebuild_service is not None:
+            root = await index_rebuild_service.resolve_report_root()
+        else:
+            root = await resolve_report_root(session_factory)
+    except RebuildRootUnavailable as exc:
+        # An unreadable recovery pointer is fail-closed for the READ path too:
+        # 503 "directory unavailable" — never a fallback read of the wrong
+        # directory (§4).
+        raise HistoryApiError(
+            503, "SEARCH_INDEX_UNAVAILABLE", str(exc)
+        ) from None
+    if root is None:
+        raise HistoryApiError(
+            500, "REPORT_READ_FAILED", "report directory is not configured"
+        )
+    root_path = Path(root).resolve()
+    path = (root_path / record.relative_path).resolve()
+    if not path.is_relative_to(root_path):
+        raise HistoryApiError(
+            500, "REPORT_READ_FAILED", "report path escapes the report directory"
+        )
+    if not path.is_file():
+        return None, None
+    try:
+        text = await asyncio.to_thread(path.read_text, "utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HistoryApiError(
+            500, "REPORT_READ_FAILED", "failed to read the report file"
+        ) from exc
+    return text, str(path)
+
+
+def _register_history_endpoints(
+    app: FastAPI,
+    session_factory: async_sessionmaker[AsyncSession],
+    token: str,
+    index_rebuild_service: IndexRebuildService | None = None,
+) -> None:
+    dependencies = [Depends(_local_token_dependency(token))] if token else []
+
+    @app.get("/api/history", response_model=HistoryListResponse, dependencies=dependencies)
+    async def history_list(
+        limit: int = 20,
+        offset: int = 0,
+        platform: str | None = None,
+        language: str | None = None,
+        asr_provider: str | None = None,
+    ) -> HistoryListResponse:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise HistoryApiError(422, "INVALID_FILTER", "limit/offset out of range")
+        async with session_factory() as sess:
+            records, total = await list_report_documents(
+                sess,
+                platform=platform,
+                language=language,
+                asr_provider=asr_provider,
+                limit=limit,
+                offset=offset,
+            )
+        return HistoryListResponse(
+            items=[_to_history_item(r) for r in records],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/api/history/{job_id}",
+        response_model=HistoryDetailResponse,
+        dependencies=dependencies,
+    )
+    async def history_detail(job_id: str) -> HistoryDetailResponse:
+        async with session_factory() as sess:
+            record = await get_report_document(sess, job_id=job_id)
+            if record is None:
+                raise HistoryApiError(404, "HISTORY_ITEM_NOT_FOUND", "history item not found")
+        core_summary: str | None = None
+        if record.doc_status != "missing":
+            text, _ = await _read_report_text(session_factory, index_rebuild_service, record)
+            if text is not None:
+                try:
+                    core_summary = parse_markdown_report(text).core_summary
+                except MarkdownParseError:
+                    core_summary = None  # file unreadable as v1; metadata still returned
+        item = _to_history_item(record)
+        return HistoryDetailResponse(**item.model_dump(), core_summary=core_summary)
+
+    @app.get(
+        "/api/history/{job_id}/report",
+        response_model=ReportContentResponse,
+        dependencies=dependencies,
+    )
+    async def history_report(job_id: str, section: str = "summary") -> ReportContentResponse:
+        valid_sections = (
+            "summary",
+            "outline",
+            "marketing",
+            "comments",
+            "metadata",
+            "transcript",
+            "full",
+        )
+        if section not in valid_sections:
+            raise HistoryApiError(422, "INVALID_FILTER", f"unknown section: {section}")
+        async with session_factory() as sess:
+            record = await get_report_document(sess, job_id=job_id)
+            if record is None:
+                raise HistoryApiError(404, "HISTORY_ITEM_NOT_FOUND", "history item not found")
+        text, abs_path = await _read_report_text(session_factory, index_rebuild_service, record)
+        if text is None or abs_path is None:
+            raise HistoryApiError(410, "REPORT_FILE_MISSING", "report file is missing")
+        try:
+            parsed = parse_markdown_report(text)
+        except MarkdownParseError:
+            parsed = None
+        if section == "full":
+            content, schema_version = text, (parsed.schema_version if parsed else 1)
+        else:
+            if parsed is None:
+                raise HistoryApiError(
+                    404,
+                    "SECTION_NOT_AVAILABLE",
+                    "report file does not parse as Schema v1",
+                )
+            content = _extract_section(parsed, text, section)
+            if not content.strip():
+                raise HistoryApiError(404, "SECTION_NOT_AVAILABLE", "section has no content")
+            # §3 responses are complete Markdown sections — heading included —
+            # so MCP passthrough (P4 get_analysis_report) stays faithful.
+            content = _SECTION_HEADINGS[section] + content
+            schema_version = parsed.schema_version
+        truncated = len(content) > _REPORT_SECTION_CAP
+        return ReportContentResponse(
+            job_id=job_id,
+            section=section,
+            markdown=content[:_REPORT_SECTION_CAP],
+            file_path=abs_path,
+            schema_version=schema_version,
+            truncated=truncated,
+        )
+
+    @app.get("/api/search", response_model=SearchResponse, dependencies=dependencies)
+    async def search(q: str = "", limit: int = 10, offset: int = 0) -> SearchResponse:
+        if not 1 <= len(q) <= 500:
+            raise HistoryApiError(422, "QUERY_INVALID", "query must be 1-500 characters")
+        if not 1 <= limit <= 50 or offset < 0:
+            raise HistoryApiError(422, "INVALID_FILTER", "limit/offset out of range")
+        try:
+            match_query = build_match_query(q)
+        except QueryInvalidError as exc:
+            raise HistoryApiError(422, "QUERY_INVALID", str(exc)) from None
+        or_query = match_query.replace(" AND ", " OR ")
+        async with session_factory() as sess:
+            try:
+                hits, total = await search_reports(
+                    sess,
+                    match_query=match_query,
+                    or_query=or_query,
+                    limit=limit,
+                    offset=offset,
+                )
+            except SQLAlchemyError as exc:
+                # Contract §0: a missing/corrupt FTS index is 503, not a bare
+                # 500 — clients must tell "no results" from "index broken".
+                raise HistoryApiError(
+                    503, "SEARCH_INDEX_UNAVAILABLE", "search index is unavailable"
+                ) from exc
+        return SearchResponse(
+            items=[
+                SearchHit(
+                    job_id=hit.job_id,
+                    title=hit.title,
+                    platform=hit.platform,
+                    analyzed_at=hit.analyzed_at,
+                    snippet=hit.snippet,
+                    matched_fields=list(hit.matched_fields),
+                    doc_status=hit.doc_status,
+                )
+                for hit in hits
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/api/index/status", response_model=IndexStatusResponse, dependencies=dependencies
+    )
+    async def index_status() -> IndexStatusResponse:
+        async with session_factory() as sess:
+            snapshot = await get_index_status(sess)
+            open_issues = await count_open_issues(sess)
+        return IndexStatusResponse(
+            state=snapshot.state,
+            last_finished_at=snapshot.finished_at,
+            last_result=RebuildCounters(
+                scanned=snapshot.scanned,
+                indexed=snapshot.indexed,
+                unchanged=snapshot.unchanged,
+                quarantined=snapshot.quarantined,
+                duplicates=snapshot.duplicates,
+                removed=snapshot.removed,
+                purged=snapshot.purged,
+            ),
+            open_issues=open_issues,
+            last_error_code=snapshot.last_error_code,
+        )
+
+    @app.get(
+        "/api/index/issues", response_model=IndexIssuesResponse, dependencies=dependencies
+    )
+    async def index_issues(
+        open: bool = True, issue_code: str | None = None, limit: int = 50, offset: int = 0
+    ) -> IndexIssuesResponse:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise HistoryApiError(422, "INVALID_FILTER", "limit/offset out of range")
+        async with session_factory() as sess:
+            items = await list_open_issues(
+                sess,
+                issue_code=issue_code,
+                open_only=open,
+                limit=limit,
+                offset=offset,
+            )
+            total = await count_index_issues(sess, issue_code=issue_code, open_only=open)
+        return IndexIssuesResponse(
+            items=[
+                IndexIssueItem(
+                    issue_code=issue.issue_code,
+                    relative_path=issue.relative_path,
+                    detail=issue.detail,
+                    first_seen_at=issue.first_seen_at,
+                    last_seen_at=issue.last_seen_at,
+                    resolved_at=issue.resolved_at,
+                )
+                for issue in items
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.post(
+        "/api/index/rebuild",
+        response_model=IndexRebuildAcceptedResponse,
+        status_code=202,
+        dependencies=dependencies,
+    )
+    async def index_rebuild(
+        payload: IndexRebuildRequest | None = None,
+    ) -> IndexRebuildAcceptedResponse:
+        if index_rebuild_service is None:
+            raise HistoryApiError(
+                503, "SEARCH_INDEX_UNAVAILABLE", "index rebuild service is unavailable"
+            )
+        purge = bool(payload.purge_missing) if payload is not None else False
+        try:
+            # pre-flight happens HERE (awaited): a missing report directory
+            # surfaces as 503 before any 202 is returned (§4 fail-safe).
+            started = await index_rebuild_service.start_rebuild(purge=purge)
+        except RebuildRootUnavailable as exc:
+            raise HistoryApiError(503, "SEARCH_INDEX_UNAVAILABLE", str(exc)) from None
+        if not started:
+            raise HistoryApiError(
+                409, "REBUILD_ALREADY_RUNNING", "a rebuild is already running"
+            )
+        return IndexRebuildAcceptedResponse(state="running")
+
+
+#: Frozen section headings — responses include them so the markdown payload is
+#: a complete Markdown section (HISTORY_SEARCH_API §3 example).
+_SECTION_HEADINGS: dict[str, str] = {
+    "summary": "## 核心摘要\n\n",
+    "outline": "## 时间轴大纲\n\n",
+    "marketing": "## 内容分析\n\n",
+    "comments": "## 评论风向\n\n",
+    "metadata": "",  # composed from the frontmatter block + 视频信息
+    "transcript": "## 完整字幕\n\n",
+    "full": "",
+}
+
+
+def _extract_section(parsed: ParsedReport, text: str, section: str) -> str:
+    if section == "summary":
+        return parsed.core_summary
+    if section == "outline":
+        return parsed.timeline_outline
+    if section == "marketing":
+        return parsed.content_analysis
+    if section == "comments":
+        return parsed.comment_sentiment
+    if section == "metadata":
+        block = frontmatter_block(text).rstrip("\n")
+        video_info = parsed.video_information
+        body = f"## 视频信息\n\n{video_info}" if video_info else ""
+        return f"{block}\n\n{body}" if body else block
+    if section == "transcript":
+        return parsed.transcript or ""
+    raise HistoryApiError(422, "INVALID_FILTER", f"unknown section: {section}")
