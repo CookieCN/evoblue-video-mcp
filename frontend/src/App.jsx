@@ -23,6 +23,12 @@ function Home() {
         </div>
         <div className="flex items-center gap-2">
           <Link
+            to="/mcp"
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            客户端
+          </Link>
+          <Link
             to="/models"
             className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
           >
@@ -435,12 +441,300 @@ function Models() {
   );
 }
 
+const HANDSHAKE_FALLBACK_LABELS = { verified: "已验证", unverified: "未验证", failed: "验证失败" };
+
+function Clients() {
+  const [clients, setClients] = useState([]);
+  const [labels, setLabels] = useState(HANDSHAKE_FALLBACK_LABELS);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(null); // client_id of the running operation
+  const [busyLabel, setBusyLabel] = useState("");
+  const [message, setMessage] = useState(null);
+  const [copyables, setCopyables] = useState({}); // client_id -> CopyableConfig
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const r = await fetch("/api/mcp-clients");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (!cancelled) {
+          setClients(data.clients ?? []);
+          setLabels({ ...HANDSHAKE_FALLBACK_LABELS, ...(data.display_labels ?? {}) });
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function load() {
+    try {
+      const r = await fetch("/api/mcp-clients");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      setClients(data.clients ?? []);
+      setLabels({ ...HANDSHAKE_FALLBACK_LABELS, ...(data.display_labels ?? {}) });
+      setError(null);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function post(client, path, body, label) {
+    setBusy(client.client_id);
+    setBusyLabel(label);
+    setMessage(null);
+    try {
+      const r = await fetch(`/api/mcp-clients/${client.client_id}/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setMessage(`${data?.error?.message ?? `HTTP ${r.status}`}（${data?.error?.code ?? ""}）`);
+        return null;
+      }
+      setMessage(data.message ?? "");
+      return data;
+    } catch (e) {
+      setMessage(`操作失败：${e.message}`);
+      return null;
+    } finally {
+      setBusy(null);
+      setBusyLabel("");
+      load();
+    }
+  }
+
+  async function install(c) {
+    await post(c, "install", {}, "正在握手…");
+  }
+
+  async function verify(c) {
+    await post(c, "verify", {}, "正在握手…");
+  }
+
+  async function remove(c) {
+    if (!window.confirm(`移除后可用备份恢复 ${c.display_name} 的配置。继续？`)) return;
+    await post(c, "remove", { confirm: true }, "正在移除…");
+  }
+
+  async function restore(c) {
+    let backups = [];
+    try {
+      const r = await fetch(`/api/mcp-clients/${c.client_id}/backups`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      backups = (await r.json()).items ?? [];
+    } catch (e) {
+      setMessage(`备份读取失败：${e.message}`);
+      return;
+    }
+    if (backups.length === 0) {
+      setMessage("没有可用备份。");
+      return;
+    }
+    const newest = backups[0];
+    const diffNote = newest.matches_current === false ? "当前配置与该备份不同，恢复将覆盖其后的修改。" : "";
+    if (!window.confirm(`将 ${c.display_name} 恢复到备份 ${newest.name}。${diffNote}恢复前会自动再做安全备份。继续？`)) {
+      return;
+    }
+    await post(c, "restore", { backup_name: newest.name, confirm: true }, "正在恢复…");
+  }
+
+  async function showCopyable(c) {
+    if (copyables[c.client_id]) {
+      setCopyables((prev) => {
+        const next = { ...prev };
+        delete next[c.client_id];
+        return next;
+      });
+      return;
+    }
+    try {
+      const r = await fetch(`/api/mcp-clients/${c.client_id}/config`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      setCopyables((prev) => ({ ...prev, [c.client_id]: data }));
+    } catch (e) {
+      setMessage(`配置生成失败：${e.message}`);
+    }
+  }
+
+  async function copyText(c) {
+    const copyable = copyables[c.client_id];
+    if (!copyable) return;
+    try {
+      await navigator.clipboard.writeText(copyable.config_text);
+      setMessage("配置已复制到剪贴板。");
+    } catch {
+      setMessage("复制失败，请手动选择文本复制。");
+    }
+  }
+
+  function flag(c) {
+    if (c.tier === "manual") return "手动档";
+    if (c.installed === true) return "已配置";
+    if (c.installed === false) return "未配置";
+    return "未知";
+  }
+
+  function engineText(c) {
+    if (c.engine_online === true) return "Engine 在线";
+    if (c.engine_online === false) return "Engine 离线";
+    return "Engine 状态未知";
+  }
+
+  return (
+    <main className="mx-auto max-w-3xl px-6 py-16">
+      <header className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-slate-950">MCP 客户端设置</h1>
+        <Link to="/" className="text-sm text-cyan-700 hover:underline">
+          返回
+        </Link>
+      </header>
+
+      <p className="mt-3 text-sm text-slate-600">
+        一键把 EvoBlue 的 MCP 工具接入支持的客户端：结构化合并、修改前备份、写入后真实握手验证。
+        无法确认时一律显示「未验证」，不会虚报成功。
+      </p>
+
+      {error && <p className="mt-4 rounded-xl bg-red-50 p-4 text-red-700">{error}</p>}
+      {message && <p className="mt-4 rounded-xl bg-emerald-50 p-4 text-emerald-700">{message}</p>}
+
+      <section aria-label="客户端列表" className="mt-6 space-y-4">
+        {clients.map((c) => {
+          const manual = c.tier === "manual";
+          const isBusy = busy === c.client_id;
+          return (
+            <div key={c.client_id} className="rounded-2xl border border-slate-200 bg-white p-5">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h2 className="text-lg font-medium text-slate-900">{c.display_name}</h2>
+                  <p className="mt-1 font-mono text-xs text-slate-500">{c.client_id}</p>
+                </div>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                  {flag(c)}
+                </span>
+              </div>
+
+              <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm text-slate-600">
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-slate-500">真实握手</dt>
+                  <dd>
+                    {labels[c.handshake] ?? c.handshake}
+                    {c.handshake_reason ? `（${c.handshake_reason}）` : ""}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-slate-500">引擎状态</dt>
+                  <dd>{engineText(c)}</dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-slate-500">其他条目</dt>
+                  <dd>{c.other_server_count == null ? "—" : `${c.other_server_count} 个（已保留）`}</dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-slate-500">备份</dt>
+                  <dd>{c.backup_count} 份</dd>
+                </div>
+              </dl>
+
+              {(c.notes ?? []).map((note) => (
+                <p key={note} className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                  {note}
+                </p>
+              ))}
+
+              <div className="mt-5 flex flex-wrap items-center gap-3">
+                {!manual && (
+                  <button
+                    type="button"
+                    disabled={busy != null}
+                    onClick={() => install(c)}
+                    className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800 disabled:opacity-50"
+                  >
+                    {isBusy && busyLabel === "正在握手…" ? "正在握手…" : "安装配置"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={busy != null}
+                  onClick={() => verify(c)}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {isBusy && busyLabel === "正在握手…" && !manual ? "测试连接…" : "测试连接"}
+                </button>
+                {!manual && (
+                  <button
+                    type="button"
+                    disabled={busy != null}
+                    onClick={() => remove(c)}
+                    className="rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    移除配置
+                  </button>
+                )}
+                {c.tier === "file_auto" && (
+                  <button
+                    type="button"
+                    disabled={busy != null || c.backup_count === 0}
+                    onClick={() => restore(c)}
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    恢复备份
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => showCopyable(c)}
+                  className="text-sm text-cyan-700 hover:underline"
+                >
+                  {copyables[c.client_id] ? "收起可复制配置" : "查看可复制配置"}
+                </button>
+              </div>
+
+              {copyables[c.client_id] && (
+                <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  {(copyables[c.client_id].steps ?? []).map((step) => (
+                    <p key={step} className="text-sm text-slate-600">
+                      {step}
+                    </p>
+                  ))}
+                  <pre className="mt-3 overflow-x-auto rounded-lg bg-slate-900 p-3 text-xs leading-relaxed text-slate-100">
+                    {copyables[c.client_id].config_text}
+                  </pre>
+                  <button
+                    type="button"
+                    onClick={() => copyText(c)}
+                    className="mt-3 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    复制配置
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </section>
+    </main>
+  );
+}
+
 export function App() {
   return (
     <Routes>
       <Route path="/" element={<Home />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/models" element={<Models />} />
+      <Route path="/mcp" element={<Clients />} />
       <Route path="*" element={<Home />} />
     </Routes>
   );

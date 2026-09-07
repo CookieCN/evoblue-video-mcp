@@ -1,6 +1,6 @@
 {
   "project": "EvoBlue Video MCP",
-  "updated": "2026-08-28",
+  "updated": "2026-09-07",
   "modules": {
     "p0_foundation": {
       "name": "P0 Harness, contracts, and skeleton",
@@ -89,6 +89,79 @@
         }
       ]
     },
+    "p4_mcp_bridge": {
+      "name": "P4 STDIO MCP Bridge and four clients",
+      "status": "done",
+      "features": [
+        {
+          "id": "P4-001",
+          "name": "Contract freeze: envelope rules, error/timeout tables, bridge launch contract, ADR 0004",
+          "status": "done"
+        },
+        {
+          "id": "P4-002",
+          "name": "Engine GET /api/diagnostics (13 redacted checks, P3 envelope)",
+          "status": "done"
+        },
+        {
+          "id": "P4-003",
+          "name": "Bridge EngineClient: frozen budgets + 15-code translation matrix",
+          "status": "done"
+        },
+        {
+          "id": "P4-004",
+          "name": "Seven-tool MCP server: flat ok envelope, strict inputs, listing merge, message synthesis",
+          "status": "done"
+        },
+        {
+          "id": "P4-005",
+          "name": "STDIO entry, real-handshake integration tests, stdout purity",
+          "status": "done"
+        },
+        {
+          "id": "P4-006",
+          "name": "Multi-client idempotency tests, config renderer, Claude Code live verification",
+          "status": "done"
+        }
+      ]
+    },
+    "p5_client_config": {
+      "name": "P5 WebUI MCP configuration and handshake",
+      "status": "done",
+      "contract": "docs/CLIENT_CONFIG_WRITE_CONTRACT.md + docs/adr/0005-client-config-write-gates.md",
+      "features": [
+        {
+          "id": "P5-001",
+          "name": "Contract freeze: client write contract, ADR 0005, drift + write-guard gates",
+          "status": "done"
+        },
+        {
+          "id": "P5-002",
+          "name": "Async handshake kernel extracted; P4 script delegates",
+          "status": "done"
+        },
+        {
+          "id": "P5-003",
+          "name": "Merge/write/backup core: TOML surgical merge, JSON deep merge, single write channel, backups",
+          "status": "done"
+        },
+        {
+          "id": "P5-004",
+          "name": "Adapters, service, and /api/mcp-clients endpoints (P3 envelope)",
+          "status": "done"
+        },
+        {
+          "id": "P5-005",
+          "name": "WebUI MCP client page: four flags, four actions, copyable configs",
+          "status": "done"
+        },
+        {
+          "id": "P5-006",
+          "name": "Real-machine acceptance matrix and harness closeout",
+          "status": "done"
+        }
+      ]
+    },
     "delivery_roadmap": {
       "name": "Post-P0 delivery phases",
       "status": "in_progress",
@@ -111,12 +184,12 @@
         {
           "id": "P4",
           "name": "STDIO MCP Bridge and four clients",
-          "status": "planned"
+          "status": "done"
         },
         {
           "id": "P5",
           "name": "WebUI MCP configuration and handshake",
-          "status": "planned"
+          "status": "done"
         },
         {
           "id": "P6",
@@ -211,9 +284,9 @@
     }
   },
   "summary": {
-    "done": 31,
+    "done": 45,
     "in_progress": 0,
-    "planned": 4,
-    "completion_pct": 88.6
+    "planned": 2,
+    "completion_pct": 95.7
   }
 }

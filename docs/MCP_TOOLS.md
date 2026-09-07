@@ -20,6 +20,57 @@
 
 - Tool Schema 版本独立于 Markdown Schema；不认识的输入字段默认拒绝，防止客户端拼写错误被静默忽略。
 
+## 0.1 返回信封（P4 冻结）
+
+每个工具的返回都是一段结构化 JSON，二者选一：
+
+- 成功：`"ok": true` + 平铺业务字段（各工具的「成功」示例即权威形状）。
+- 失败：`"ok": false` + `error` 对象（即上文「错误统一为」的结构）。
+
+规则：
+
+- Bridge 把两种返回都作为**正常工具结果**交付（JSON 文本内容，P4 不使用 MCP structuredContent——协议要求 outputSchema 顶层 `type: object`，判别联合 schema 无法满足，见 ADR 0004），MCP `isError` 恒为 `false`。领域失败（Engine 离线、任务不存在）是工具对问题的正常回答；部分客户端对 `isError=true` 只展示文本，会丢失 `code/retryable`。`isError=true` 保留给 SDK/协议层意外（如未知输入字段被拒），P4 工具内不产生。
+- 客户端必须先读 `ok` 再读业务字段；`ok` 是成功/失败判别字段。
+- `detail` 恒为已脱敏文本或 `null`，绝不包含绝对路径、凭据或 Cookie。
+
+## 0.2 稳定错误码总表（P4 冻结）
+
+| code | retryable | 触发方 | 语义 |
+|---|---|---|---|
+| `INVALID_URL` | false | Engine | URL 无法解析或未通过规范化校验 |
+| `UNSUPPORTED_PLATFORM` | false | Engine | 平台识别成功但不受支持 |
+| `ENGINE_NOT_READY` | true | Bridge | Engine 未启动或端口不可达；先启动 Local Engine 再重试 |
+| `ENGINE_TIMEOUT` | true | Bridge | Engine 未在工具预算内响应；可重试，提交类重试依赖幂等键 |
+| `ENGINE_UNAUTHORIZED` | false | Bridge | 本机 token 校验失败；在 WebUI 重新完成本机配对 |
+| `ENGINE_PROTOCOL_ERROR` | true | Bridge | Engine 响应形状不符合合同；属于本地故障 |
+| `JOB_NOT_FOUND` | false | Bridge | `job_id` 不存在 |
+| `REPORT_NOT_READY` | true | Bridge | 任务尚未完成或报告文件当前不可得 |
+| `SECTION_NOT_AVAILABLE` | false | Engine | 该 section 在当前报告中不存在 |
+| `REPORT_READ_FAILED` | false | Engine | 报告文件存在但不可读或解析失败 |
+| `INVALID_FILTER` | false | Engine | 列表/报告过滤参数非法 |
+| `QUERY_INVALID` | false | Engine | 搜索查询为空或语法不可接受 |
+| `SEARCH_INDEX_UNAVAILABLE` | true | Engine | 搜索索引缺失或损坏；触发重建后可恢复 |
+| `QUEUE_FULL` | — | reserved | 预留码；本地单用户 Engine 无队列上限，当前版本不可达 |
+| `BRIDGE_INTERNAL` | false | Bridge | Bridge 内部意外；查看 Bridge/Engine 日志 |
+
+- 本表是错误码的唯一权威清单；新增码必须先改本表，再同步 `STABLE_ERROR_CODES`（合同漂移测试锁定两边一致）。
+
+## 0.3 Bridge 对 Engine 的超时预算（P4 冻结）
+
+| 工具 | 预算（秒） |
+|---|---|
+| `submit_video_analysis` | 10 |
+| `get_analysis_status` | 5 |
+| `get_analysis_report` | 10 |
+| `list_analysis_jobs` | 10 |
+| `search_analysis_history` | 10 |
+| `cancel_analysis` | 10 |
+| `diagnose_environment`（本地组） | 15 |
+| `diagnose_environment`（含网络） | 30 |
+| 健康检查 / 版本握手 | 3 |
+
+- 超时一律映射 `ENGINE_TIMEOUT`（retryable=true）；诊断工具按组预算，单项检查内部另有独立超时，单项超时不等于工具超时。
+
 ## 1. submit_video_analysis
 
 输入 Schema：
@@ -75,6 +126,7 @@
 ```
 
 - 错误：`JOB_NOT_FOUND`、`ENGINE_TIMEOUT`。
+- 字段语义：`stage` 是 ≤32 字符的管线阶段名（自由字符串，如 `summarizing_chunks`），不是任务状态枚举，可为 `null`；`message` 由 Bridge 按当前状态合成的人类可读文本，Engine 不提供该字段。
 - 幂等性：相同时间点读取无副作用；状态可能随 Worker 前进。
 - 只读：是。
 - 超时：5 秒；超时不改变 Job。
@@ -133,6 +185,8 @@
 ```
 
 - 错误：`INVALID_FILTER`、`ENGINE_TIMEOUT`。
+- 数据源合并（P4 冻结）：运行中（非终态）任务来自 `/api/jobs`，已完成历史来自 `/api/history`；运行中条目排在前（按提交时间降序），已按 `job_id` 去重（同一任务两侧都出现时运行中条目胜出）。运行中条目的 `title`/`platform` 为 `null`（任务表无此维度）；`platform` 与 `query` 过滤只作用于历史源。
+- `query` 为历史标题的大小写不敏感子串匹配。`status` 过滤下推到 `/api/jobs` 的服务端过滤；历史源视为 `completed`，仅当 `status` 为 `null` 或 `completed` 时纳入。`total` = 运行中条数 + 历史总条数（过滤后口径）。
 - 幂等性：只读快照。
 - 只读：是。
 - 超时：10 秒；固定最大页长 100。
@@ -185,6 +239,7 @@
 运行阶段可能返回 `accepted: true`、当前 status 不变及“将在安全点取消”。
 
 - 错误：`JOB_NOT_FOUND`；终止状态不报冲突，返回 `accepted: false` 的幂等结果。
+- `accepted` 定义（P4 冻结）：Engine 返回 200 且 Job 处于非终态 → `true`（`queued`/`retry_wait`/`waiting_for_model` 直接置 `cancelled`；运行中置取消标志，`message` 说明「将在安全点取消」，`status` 返回当前状态）；Job 已终态 → `false`，`status` 返回当前终态。
 - 幂等性：重复取消不产生额外副作用。
 - 只读：否。
 - 超时：10 秒；超时后客户端应查询状态，不应假设取消失败。
@@ -216,7 +271,9 @@
 }
 ```
 
-检查：Local Engine、数据库、报告目录、FFmpeg、yt-dlp、LLM 配置/API 连通性、CTranslate2、GPU、Whisper 模型、Cookie 浏览器、磁盘空间。
+检查名冻结枚举（P4；顺序即输出顺序）：`local_engine`、`engine_version`、`database`、`report_directory`、`disk_space`、`ffmpeg`、`yt_dlp`、`llm_config`、`llm_api`、`asr_runtime`、`gpu`、`asr_models`、`cookie_browser`。
+
+- `asr_runtime` 覆盖本地推理运行时（sherpa-onnx + onnxruntime）与 Provider 注册状态；`asr_models` 覆盖已安装模型与激活状态；`llm_api` 仅在 `include_network=true` 时执行，否则 `skipped`。
 
 - 错误：单项失败进入 checks，不应让整个工具失败；只有 Engine 无法提供诊断时返回通用错误。
 - 幂等性：逻辑只读，但可能访问网络/读取系统能力；不得下载、安装或修改配置。

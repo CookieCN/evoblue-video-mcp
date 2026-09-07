@@ -14,10 +14,19 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.params import Depends as DependsParam
 from fastapi.responses import JSONResponse
+from httpx import AsyncClient as _HttpClient
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp import __version__
+from evoblue_video_mcp.application.client_config.errors import ClientConfigError
+from evoblue_video_mcp.application.client_config.models import HANDSHAKE_LABELS
+from evoblue_video_mcp.application.client_config.service import (
+    ClientConfigService,
+    ClientStatus,
+    OperationResult,
+)
+from evoblue_video_mcp.application.diagnostics import collect_diagnostics
 from evoblue_video_mcp.application.submit import compute_config_fingerprint, submit_video
 from evoblue_video_mcp.asr.service import ModelManagerService, ModelSummary
 from evoblue_video_mcp.config import CredentialStore, Settings, llm_credential_reference
@@ -59,6 +68,17 @@ from evoblue_video_mcp.storage.repository import (
 from evoblue_video_mcp.web.schemas import (
     AppSettingsResponse,
     AppSettingsUpdate,
+    BackupInfoResponse,
+    BackupListResponse,
+    ClientListResponse,
+    ClientOperationRequest,
+    ClientOperationResponse,
+    ClientRemoveRequest,
+    ClientRestoreRequest,
+    ClientStatusResponse,
+    CopyableConfigResponse,
+    DiagnosticCheckResponse,
+    DiagnosticsResponse,
     HistoryDetailResponse,
     HistoryItem,
     HistoryListResponse,
@@ -88,8 +108,45 @@ logger = logging.getLogger(__name__)
 
 #: P3 endpoints use the structured error envelope — including FastAPI's
 #: pre-endpoint parameter validation, which would otherwise emit the legacy
-#: ``{"detail": ...}`` shape (HISTORY_SEARCH_API §0).
-_P3_ENVELOPE_PREFIXES = ("/api/history", "/api/search", "/api/index")
+#: ``{"detail": ...}`` shape (HISTORY_SEARCH_API §0). P4 diagnostics joins the
+#: same envelope from birth (ADR 0004); P5 client-config joins likewise
+#: (CLIENT_CONFIG_WRITE_CONTRACT §7).
+_P3_ENVELOPE_PREFIXES = (
+    "/api/history",
+    "/api/search",
+    "/api/index",
+    "/api/diagnostics",
+    "/api/mcp-clients",
+)
+
+_LLM_PROBE_TIMEOUT_S = 10.0
+
+
+async def _credential_is_configured(
+    credential_store: CredentialStore | None, reference: str | None
+) -> bool:
+    """Best-effort credential existence probe; failures mean "not configured"."""
+    if credential_store is None or reference is None:
+        return False
+    try:
+        return bool(await asyncio.to_thread(credential_store.get_secret, reference))
+    except Exception:
+        return False
+
+
+def _llm_status_probe() -> Callable[[str], Awaitable[int]]:
+    """Build an injectable GET-status probe for the diagnostics network check.
+
+    Takes the full URL (collect_diagnostics applies the configured base_url)
+    so tests can inject a fake and never touch the network.
+    """
+
+    async def probe(url: str) -> int:
+        async with _HttpClient(timeout=_LLM_PROBE_TIMEOUT_S) as client:
+            response = await client.get(url)
+            return response.status_code
+
+    return probe
 
 
 class HealthResponse(TypedDict):
@@ -157,16 +214,20 @@ def create_app(
     model_service: ModelManagerService | None = None,
     index_rebuild_service: IndexRebuildService | None = None,
     report_pointer_file: Path | None = None,
+    fallback_report_root: Path | None = None,
+    data_directory: Path | None = None,
+    client_config_service: ClientConfigService | None = None,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
     """Create the Local Engine HTTP application.
 
     Data endpoints attach when a session factory is given; model-management
     endpoints attach when a ``model_service`` is also given; index-rebuild
-    endpoints attach when an ``index_rebuild_service`` is also given. When
-    ``local_token`` (or ``Settings.local_access_token``) is set, data endpoints
-    require it via the ``X-Local-Token`` header; ``/api/health`` stays
-    token-exempt.
+    endpoints attach when an ``index_rebuild_service`` is also given;
+    client-config endpoints attach when a ``client_config_service`` is given.
+    When ``local_token`` (or ``Settings.local_access_token``) is set, data
+    endpoints require it via the ``X-Local-Token`` header; ``/api/health``
+    stays token-exempt.
     """
     app_settings = settings or Settings()
     token = local_token if local_token is not None else app_settings.local_access_token
@@ -184,6 +245,16 @@ def create_app(
             content={"error": {"code": exc.code, "message": exc.message}},
         )
 
+    @app.exception_handler(ClientConfigError)
+    async def _client_config_error_handler(
+        request: Request, exc: ClientConfigError
+    ) -> JSONResponse:
+        # P5 stable codes (CLIENT_CONFIG_WRITE_CONTRACT §7) — same envelope.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
     @app.exception_handler(RequestValidationError)
     async def _request_validation_handler(
         request: Request, exc: RequestValidationError
@@ -191,6 +262,18 @@ def create_app(
         # Parameter type errors (e.g. limit=abc, open=maybe) are rejected by
         # FastAPI BEFORE the endpoint runs — P3 routes must still answer in the
         # frozen envelope; legacy endpoints keep FastAPI's default shape.
+        if request.url.path.startswith("/api/mcp-clients"):
+            # P5's frozen code table has no INVALID_FILTER — request-body
+            # validation failures map to their own code (contract §7).
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "INVALID_REQUEST",
+                        "message": "invalid request body",
+                    }
+                },
+            )
         if request.url.path.startswith(_P3_ENVELOPE_PREFIXES):
             return JSONResponse(
                 status_code=422,
@@ -217,8 +300,73 @@ def create_app(
         _register_history_endpoints(
             app, session_factory, token, index_rebuild_service
         )
+        _register_diagnostics_endpoint(
+            app,
+            session_factory,
+            token,
+            credential_store=credential_store,
+            model_service=model_service,
+            fallback_report_root=fallback_report_root,
+            pointer_file=report_pointer_file,
+            data_directory=data_directory,
+        )
+
+    if client_config_service is not None:
+        _register_client_config_endpoints(app, token, client_config_service)
 
     return app
+
+
+def _register_diagnostics_endpoint(
+    app: FastAPI,
+    session_factory: async_sessionmaker[AsyncSession],
+    token: str,
+    *,
+    credential_store: CredentialStore | None,
+    model_service: ModelManagerService | None,
+    fallback_report_root: Path | None,
+    pointer_file: Path | None,
+    data_directory: Path | None,
+) -> None:
+    """GET /api/diagnostics — Engine-side checks for the MCP diagnose tool.
+
+    Contract docs/MCP_TOOLS.md §7: a single failing check degrades only itself,
+    output is redacted, and the network probe runs only on explicit request.
+    Errors answer in the frozen structured envelope (registered in
+    ``_P3_ENVELOPE_PREFIXES``).
+    """
+    dependencies = [Depends(_local_token_dependency(token))] if token else []
+
+    @app.get(
+        "/api/diagnostics",
+        response_model=DiagnosticsResponse,
+        dependencies=dependencies,
+    )
+    async def diagnostics(include_network: bool = False) -> DiagnosticsResponse:
+        report = await collect_diagnostics(
+            session_factory,
+            credential_store=credential_store,
+            model_service=model_service,
+            fallback_report_root=fallback_report_root,
+            pointer_file=pointer_file,
+            data_directory=data_directory,
+            include_network=include_network,
+            http_get=_llm_status_probe(),
+        )
+        return DiagnosticsResponse(
+            engine_version=report.engine_version,
+            overall=report.overall,
+            checks=[
+                DiagnosticCheckResponse(
+                    name=check.name,
+                    status=check.status,
+                    message=check.message,
+                    detail=check.detail,
+                )
+                for check in report.checks
+            ],
+            redacted=True,
+        )
 
 
 def _register_data_endpoints(
@@ -229,14 +377,6 @@ def _register_data_endpoints(
     model_service: ModelManagerService | None,
     report_pointer_file: Path | None = None,
 ) -> None:
-    async def credential_is_configured(reference: str | None) -> bool:
-        if credential_store is None or reference is None:
-            return False
-        try:
-            return bool(await asyncio.to_thread(credential_store.get_secret, reference))
-        except Exception:
-            return False
-
     dependencies = [Depends(_local_token_dependency(token))] if token else []
 
     # §4 dual-write discipline for report_directory: "read current → write
@@ -300,7 +440,9 @@ def _register_data_endpoints(
             llm_provider=current.llm_provider,
             llm_base_url=current.llm_base_url,
             llm_model=current.llm_model,
-            llm_api_key_configured=await credential_is_configured(current.llm_credential_ref),
+            llm_api_key_configured=await _credential_is_configured(
+                credential_store, current.llm_credential_ref
+            ),
             asr_provider=current.asr_provider or "auto",
             whisper_cpp_executable=current.whisper_cpp_executable,
         )
@@ -471,7 +613,9 @@ def _register_data_endpoints(
             llm_provider=saved.llm_provider,
             llm_base_url=saved.llm_base_url,
             llm_model=saved.llm_model,
-            llm_api_key_configured=await credential_is_configured(saved.llm_credential_ref),
+            llm_api_key_configured=await _credential_is_configured(
+                credential_store, saved.llm_credential_ref
+            ),
             asr_provider=saved.asr_provider or "auto",
             whisper_cpp_executable=saved.whisper_cpp_executable,
         )
@@ -923,3 +1067,172 @@ def _extract_section(parsed: ParsedReport, text: str, section: str) -> str:
     if section == "transcript":
         return parsed.transcript or ""
     raise HistoryApiError(422, "INVALID_FILTER", f"unknown section: {section}")
+
+
+def _to_client_status(status: ClientStatus) -> ClientStatusResponse:
+    return ClientStatusResponse(
+        client_id=status.client_id,
+        display_name=status.display_name,
+        tier=status.tier,
+        target_present=status.target_present,
+        installed=status.installed,
+        entry_matches_current=status.entry_matches_current,
+        config_supported=status.config_supported,
+        handshake=status.handshake,
+        handshake_reason=status.handshake_reason,
+        handshake_checked_at=status.handshake_checked_at,
+        engine_online=status.engine_online,
+        other_server_count=status.other_server_count,
+        backup_count=status.backup_count,
+        notes=status.notes,
+    )
+
+
+def _register_client_config_endpoints(
+    app: FastAPI,
+    token: str,
+    service: ClientConfigService,
+) -> None:
+    """P5 client-config surface (docs/CLIENT_CONFIG_WRITE_CONTRACT.md §7).
+
+    Registered only when a ``client_config_service`` is injected; errors
+    answer in the structured envelope (``_P3_ENVELOPE_PREFIXES``). Field-level
+    extraction only: responses carry our entry's fields, other-server counts
+    and statuses — never whole config files (§8).
+    """
+    dependencies = [Depends(_local_token_dependency(token))] if token else []
+
+    @app.get("/api/mcp-clients", response_model=ClientListResponse, dependencies=dependencies)
+    async def list_clients() -> ClientListResponse:
+        statuses = await service.list_status()
+        return ClientListResponse(
+            clients=[_to_client_status(status) for status in statuses],
+            display_labels=dict(HANDSHAKE_LABELS),
+        )
+
+    @app.get(
+        "/api/mcp-clients/{client_id}",
+        response_model=ClientStatusResponse,
+        dependencies=dependencies,
+    )
+    async def client_status(client_id: str) -> ClientStatusResponse:
+        return _to_client_status(await service.status(client_id))
+
+    @app.post(
+        "/api/mcp-clients/{client_id}/install",
+        response_model=ClientOperationResponse,
+        dependencies=dependencies,
+    )
+    async def install_client(
+        client_id: str, body: ClientOperationRequest | None = None
+    ) -> ClientOperationResponse:
+        force = body.force if body is not None else False
+        result = await service.install(client_id, force=force)
+        return _to_operation_response(result)
+
+    @app.post(
+        "/api/mcp-clients/{client_id}/verify",
+        response_model=ClientOperationResponse,
+        dependencies=dependencies,
+    )
+    async def verify_client(client_id: str) -> ClientOperationResponse:
+        return _to_operation_response(await service.verify(client_id))
+
+    @app.post(
+        "/api/mcp-clients/{client_id}/remove",
+        response_model=ClientOperationResponse,
+        dependencies=dependencies,
+    )
+    async def remove_client(
+        client_id: str, body: ClientRemoveRequest | None = None
+    ) -> ClientOperationResponse:
+        confirm = body.confirm if body is not None else False
+        return _to_operation_response(
+            await service.remove(client_id, confirm=confirm)
+        )
+
+    @app.get(
+        "/api/mcp-clients/{client_id}/backups",
+        response_model=BackupListResponse,
+        dependencies=dependencies,
+    )
+    async def client_backups(client_id: str) -> BackupListResponse:
+        items = await service.backups(client_id)
+        return BackupListResponse(
+            items=[
+                BackupInfoResponse(
+                    name=info.name,
+                    created_at=info.created_at,
+                    size_bytes=info.size_bytes,
+                    sha256=info.sha256,
+                    was_absent=info.was_absent,
+                    matches_current=info.matches_current,
+                )
+                for info in items
+            ]
+        )
+
+    @app.post(
+        "/api/mcp-clients/{client_id}/restore",
+        response_model=ClientOperationResponse,
+        dependencies=dependencies,
+    )
+    async def restore_client(
+        client_id: str, body: ClientRestoreRequest | None = None
+    ) -> ClientOperationResponse:
+        if body is None or not body.backup_name:
+            # A restore without a named backup has no confirmation target —
+            # the confirmation gate is the honest failure, not a code outside
+            # the frozen table.
+            raise HistoryApiError(
+                422, "CONFIRMATION_REQUIRED", "restore requires backup_name and confirm:true"
+            )
+        result = await service.restore(
+            client_id, body.backup_name, confirm=body.confirm
+        )
+        return _to_operation_response(result)
+
+    @app.get(
+        "/api/mcp-clients/{client_id}/config",
+        response_model=CopyableConfigResponse,
+        dependencies=dependencies,
+    )
+    async def client_copyable_config(client_id: str) -> CopyableConfigResponse:
+        copyable = service.copyable(client_id)
+        return CopyableConfigResponse(
+            client_id=copyable.client_id,
+            format=copyable.format,
+            config_text=copyable.config_text,
+            target_path=copyable.target_path,
+            steps=copyable.steps,
+        )
+
+
+def _to_operation_response(result: OperationResult) -> ClientOperationResponse:
+    """Re-shape the service's frozen OperationResult into the API model."""
+    return ClientOperationResponse(
+        client_id=result.client_id,
+        operation=result.operation,
+        performed=result.performed,
+        installed=result.installed,
+        entry_matches_current=result.entry_matches_current,
+        handshake=result.handshake,
+        handshake_reason=result.handshake_reason,
+        handshake_checked_at=result.handshake_checked_at,
+        backup_name=result.backup_name,
+        restored_from=result.restored_from,
+        safety_backup=result.safety_backup,
+        removed_target=result.removed_target,
+        copyable=(
+            None
+            if result.copyable is None
+            else CopyableConfigResponse(
+                client_id=result.copyable.client_id,
+                format=result.copyable.format,
+                config_text=result.copyable.config_text,
+                target_path=result.copyable.target_path,
+                steps=result.copyable.steps,
+            )
+        ),
+        message=result.message,
+    )

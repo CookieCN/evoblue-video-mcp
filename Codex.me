@@ -14,8 +14,10 @@
 ## Current progress
 
 - P0 已完成：Harness、产品/架构合同、MCP/Job/Markdown/WebUI 合同、前后端骨架和基础 CI。
-- P1/P2 已完成：SQLite Job、版本化迁移、状态转换、单 Worker 租约、崩溃恢复、Worker 循环、Engine 启动恢复、WebUI 后端 API 与前端骨架，以及 YouTube/Bilibili 字幕分析闭环。
-- P6/ASR：ASR-0～ASR-3 已完成。Lite/Standard/Whisper 分层路由、`waiting_for_model`、显式安装建议、安装后恢复与 Markdown ASR 身份已接通；下一步是 ASR-4 打包、基准、许可证和发布加固。
+- P1～P4 已完成：SQLite Job、版本化迁移、状态转换、单 Worker 租约、崩溃恢复、YouTube/Bilibili 字幕分析闭环、Markdown/FTS5/索引重建，以及七工具 STDIO MCP Bridge。
+- P4 客户端实测：Claude Code 已完成工具调用；Codex 0.153.4 持久配置已由真实用户态读取并完成 `diagnose_environment` / `list_analysis_jobs`；WorkBuddy 已完成真实握手、七工具发现与提交/状态工具级实测（报告列被 Engine 未完成初始设置阻断，任务按设计停在 queued）；DeepSeek 保持未验证。
+- P6/ASR 已完成：Standard SenseVoiceSmall INT8 通过基准并成为唯一正式默认；Lite 未过审、不自动推荐；模型管理、路由恢复、许可与打包门禁均已收口。
+- 当前阶段为 P5：WebUI MCP 自动配置与真实握手。
 - 详细状态以 `.agents/progress.md` 和 `.agents/feature_list.json` 为准。
 
 ## ASR direction

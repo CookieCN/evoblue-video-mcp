@@ -7,15 +7,22 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from platformdirs import user_data_path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evoblue_video_mcp.application.client_config.service import (
+    ClientConfigService,
+    default_payload,
+    kernel_verifier,
+)
 from evoblue_video_mcp.asr.registration import register_available_asr_providers
 from evoblue_video_mcp.asr.service import ModelManagerService, reconcile_waiting_asr_jobs
 from evoblue_video_mcp.config import CredentialStore, KeyringCredentialStore, Settings
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.llm.http import HttpLLMProvider
+from evoblue_video_mcp.mcp.engine_client import EngineClient
 from evoblue_video_mcp.platforms.yt_dlp_adapter import YtDlpAdapter
 from evoblue_video_mcp.reports.writer import ReportWriter
 from evoblue_video_mcp.runtime.assembly import build_handlers
@@ -166,6 +173,27 @@ def create_runtime_app(
         fallback_report_root=paths.default_reports,
         pointer_file=report_pointer_file,
     )
+    # P5 client-config service: payload from this process's interpreter
+    # (contract §3), engine liveness via the same loopback client shape the
+    # Bridge uses (trust_env=False so proxies cannot fake "online").
+    probe_http = httpx.AsyncClient(trust_env=False)
+    engine_probe_client = EngineClient(
+        probe_http,
+        base_url=f"http://{runtime_settings.engine_host}:{runtime_settings.engine_port}",
+        token=runtime_settings.local_access_token or None,
+    )
+
+    async def _engine_online_probe() -> bool | None:
+        try:
+            return await engine_probe_client.health() is not None
+        except httpx.TransportError:
+            return False
+
+    client_config_service = ClientConfigService(
+        payload=default_payload(runtime_settings.engine_port),
+        verifier=kernel_verifier(),
+        engine_probe=_engine_online_probe,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
@@ -210,6 +238,7 @@ def create_runtime_app(
             await index_rebuild_service.shutdown()
             await model_service.close()
             await engine.dispose()
+            await probe_http.aclose()
 
     return create_app(
         runtime_settings,
@@ -218,5 +247,8 @@ def create_runtime_app(
         model_service=model_service,
         index_rebuild_service=index_rebuild_service,
         report_pointer_file=report_pointer_file,
+        fallback_report_root=paths.default_reports,
+        data_directory=paths.data,
+        client_config_service=client_config_service,
         lifespan=lifespan,
     )

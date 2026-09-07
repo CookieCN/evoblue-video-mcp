@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,7 +19,15 @@ class Settings(BaseSettings):
     engine_port: int = Field(default=8765, ge=1024, le=65535)
     # Random local access token protecting data endpoints; empty means auth is disabled
     # (development only). Production generates one at engine startup.
-    local_access_token: str = ""
+    # EVOBLUE_LOCAL_TOKEN is the Bridge-launch-contract alias
+    # (CLIENT_COMPATIBILITY.md). validation_alias names bypass env_prefix, so
+    # both fully-qualified names are listed explicitly.
+    local_access_token: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "local_access_token", "EVOBLUE_LOCAL_ACCESS_TOKEN", "EVOBLUE_LOCAL_TOKEN"
+        ),
+    )
     telemetry_enabled: bool = False
     data_directory: Path | None = None
     asr_model_dir: Path | None = None

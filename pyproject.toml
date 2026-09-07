@@ -42,6 +42,9 @@ package = [
   "pyinstaller>=6.10,<7"
 ]
 
+[project.scripts]
+evoblue-bridge = "evoblue_video_mcp.mcp.__main__:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/evoblue_video_mcp"]
 
@@ -72,6 +75,22 @@ extend-exclude = [".codex-worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# This contract test quotes Chinese doc headings verbatim (fullwidth chars are
+# part of the heading text it must locate).
+"tests/contract/test_client_config_formats.py" = ["RUF001"]
+# Same for the P5 write-contract drift + structural gates.
+"tests/contract/test_client_write_contract.py" = ["RUF001"]
+"tests/contract/test_client_write_guards.py" = ["RUF001"]
+# The client registry strings must byte-match the contract doc's §1 table
+# (fullwidth punctuation included) — that is the drift lock working.
+"src/evoblue_video_mcp/application/client_config/specs.py" = ["RUF001"]
+# User-facing Chinese copy correctly uses fullwidth punctuation.
+"src/evoblue_video_mcp/application/client_config/service.py" = ["RUF001"]
+"src/evoblue_video_mcp/application/client_config/adapters/file_auto.py" = ["RUF001"]
+"src/evoblue_video_mcp/application/client_config/adapters/claude_code.py" = ["RUF001"]
+"src/evoblue_video_mcp/application/client_config/adapters/deepseek.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"

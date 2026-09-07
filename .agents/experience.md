@@ -120,7 +120,7 @@
 
 **Rule**：迁移一旦写入 `_MIGRATIONS` 并可能被任何环境执行，其 DDL 就是不可变的；schema 变更只能追加新版本 + 显式 drop/rebuild，绝不能改历史版本的 SQL。加迁移必配「冻结旧库升级」测试。
 
-## 11. 代码许可证不能替代模型权重与转换制品许可证
+## 13. 代码许可证不能替代模型权重与转换制品许可证
 
 **Problem**：许可证清单把 SenseVoice 和 Zipformer 权重都直接标成 Apache-2.0，但精确 SenseVoice 归档内的 `LICENSE` 实际指向 FunASR Model License，精确 Zipformer 归档则没有任何许可证文件。
 
@@ -177,3 +177,53 @@
 **Solution**：先用已知可转写的真实音频（lei-jun-test.wav）做链路对照，波形能量检查定位语料问题；WER 改用保留词边界的 `normalize_words`，CER 保持去空白归一化。最终阈值只在修复后的链路上冻结一次。
 
 **Rule**：基准门禁文档必须记录被丢弃的运行及原因（harness-validation trail）；门禁对照真实音频样本先验证评测链路，再信任模型得分。
+
+## 19. 读用户级 MCP 配置会把明文凭据带进 AI 会话，进入会话即视为已暴露
+
+**Problem**：Codex 验收会话在诊断中读取用户级客户端配置（`~/.codex/config.toml` 的 `http_headers`、`~/.workbuddy/mcp.json` 的 `env`/`headers`），AgentKey 与 SellerSprite 明文凭据原样进入会话输出；同日本项目会话整读 `~/.workbuddy/mcp.json` 也把 Semrush/SellerSprite key 显示进了工具结果。这类配置格式本来就要求凭据内联（条目无外部引用约定），而「读文件 → 回显 → 送模型」链路会把被读内容送出本机。
+
+**Root Cause**：把「读取配置文件验证结构」当成无敏感操作；实际上任何整文件原文进入上下文的动作都会把内联凭据交给模型服务商。
+
+**Solution**：当日轮换全部涉事凭据；后续读取此类文件只做字段级提取（key 名、command/args 形态、enabled 状态），用 JSON/TOML 解析取结构而非整文件回显；无法避免时在回复中不复述值并明确提示轮换。
+
+**Rule**：凡进入 AI 会话（工具结果、日志、粘贴报告均算）的凭据一律视为已暴露，立即轮换；读用户级配置优先解析取字段，不整文件 cat 进上下文；跨 agent 交接文档只引用凭据文件位置，不引用内容。
+
+## 20. 测试不许触到真实外部系统——注入缝必须在服务构造函数上
+
+**Problem**：P5 集成测试跑 `claude mcp add` 时，本机 PATH 上真有 `claude` CLI，测试把 `evoblue-video` 真实写进了 Wilson 的 Claude Code 配置。巧合是配置内容恰好正确（路径、参数都对），但这是测试未经授权修改用户真实状态。
+
+**Root Cause**：`ClientConfigService` 内部 `CliRunner()` 硬编码生产实现，测试没有注入缝，只能打到真 CLI。
+
+**Solution**：服务构造函数加 `cli_runner` 参数（生产默认、测试传 fake）。规则：**任何会 spawn 子进程、写用户文件、发网络请求的依赖，注入缝必须在最外层构造函数上**；测试环境断言 fake 成本远低于事故成本。验收脚本触真实系统前先做独立字节快照（sha256 前后比对），跑完恢复或明确报告保留理由。
+
+## 21. 路径大小写差异是「受管修复」不是 no-op——还原用户状态要靠快照不是靠记忆
+
+**Problem**：P5 真机验收把 Codex/WorkBuddy 条目里 P4 时代的小写 `f:\` 盘符静默规整成 `F:\`（受管字段差异→替换），WorkBuddy 还连带丢了冗余 `disabled:false`。功能等价，但 WorkBuddy 的 Trust 状态可能与条目内容挂钩。
+
+**Root Cause**：Windows 路径大小写不敏感是语义事实，但字符串比较是大小写敏感的——「功能等价」与「字节相同」是两回事；no-op 判据用哪一个取决于产品语义。
+
+**Solution**：验收/测试前用独立快照（cp + sha256）留底，结束后恢复字节或说明保留理由；「工具会做什么」写进合同（本案：受管修复是设计行为，已在合同 §10 记录）。若要避免这类重写，比较层需要平台感知的路径归一化——未做，留给 Wilson 决策。
+
+## 22. heredoc/工具传输会吞转义序列——不可见字符一律用 chr(92) 构造并回读验证
+
+**Problem**：往 merge_json.py 写 BOM 检查行时，`"﻿"` 经 heredoc 传输变成不可见 BOM 字面量本身，连续两次替换「成功」（脚本无条件打印 done）实际没生效。
+
+**Root Cause**：工具传输层把 `\u` 解了一次转义；且脚本打印 done 不校验结果，假成功。这是 AGENTS.md Gotcha #7 的变体：不只 MSYS 改写路径，任何跨工具的文本传输都会动转义和不可见字符。
+
+**Solution**：需要写转义序列/不可见字符时用 `chr(92)` 之类的构造拼接，写完用 repr 或逐字节 grep 验证；批量替换脚本必须带断言（替换计数、内容校验），绝不无条件打印成功。
+
+## 23. RTL 测试不自动 cleanup——DOM 累积造成「重复元素」假象
+
+**Problem**：Vitest+RTL 下第二个用例 `getByRole` 报 Found multiple elements，排查半天组件逻辑，实际是上一个用例的 DOM 没卸载。
+
+**Root Cause**：RTL 自动 cleanup 依赖测试框架 globals；本项目 vitest 未开 `globals: true`，cleanup 从未执行。既往用例碰巧没有同名元素才没炸。
+
+**Solution**：测试文件显式 `afterEach(cleanup)`；mock fetch 按 URL 路由时用「在 URL 中出现位置最靠后」的键匹配（前缀 `/api/x` 会比后缀 `/x/y` 更长，按长度选会选错）。
+
+## 24. 可复现断言只锁稳定字段——内存/时序指标用存在性+上限门禁
+
+**Problem**：ASR 基准测试断言两次运行的报告逐字节相等，`peak_rss_delta_bytes` 受分配器/缓存/运行顺序影响天然波动，全量套件时绿时红（负载相关，单跑无法复现）。
+
+**Root Cause**：把「确定性指标」和「测量指标」混在同一个相等断言里；RSS 的逐次完全相等没有产品意义。
+
+**Solution**（2026-09-07 评审定调）：精确相等只用于稳定字段；测量类指标断言「存在 + 有限 + 非负」或上限门禁，不删指标本身。新增强制锁：`verified` 状态必须同时有配置证据（contract §6），缓存的 verified 在配置证据消失/不匹配/不可解析时立即失效。

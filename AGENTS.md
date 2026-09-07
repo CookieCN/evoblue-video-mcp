@@ -7,8 +7,8 @@
 ## 当前阶段
 
 - 初始化日期：2026-08-24
-- 当前阶段：P3 — 历史、Markdown、FTS5、索引重建（四合同已冻结，实现待开工；P2 已验收；P6/ASR 的 ASR-0～ASR-4 已全部完成并收口）
-- P1/P2 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环；P6/ASR 全链路（Provider 分层、Model Manager、路由、基准门禁、打包矩阵与发布验证）完成，Standard 已过审为正式默认模型。
+- 当前阶段：P5 已交付，下一阶段 P7 — Windows 安装器和 GitHub Release（P1–P6 已完成；P5 交付 WebUI 客户端配置自动安装/验证/移除/恢复：合同 `docs/CLIENT_CONFIG_WRITE_CONTRACT.md` + ADR 0005，三档模型 file_auto/cli/manual，零依赖 TOML 外科合并 + 单一写入通道 + 备份恢复 + 真实握手硬门禁，真机验收 12/12 见合同 §10；一键拉起 Engine 与锁文件归 P7）
+- P1–P4 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环、历史/FTS5/索引重建、STDIO MCP Bridge（七工具、信封统一、错误翻译矩阵、真实握手与多客户端幂等验收）；P6/ASR 全链路完成，Standard 已过审为正式默认模型。
 
 ## Owner Context
 
@@ -45,9 +45,13 @@
 | 3 | Windows System32 可能提供 ONNX Runtime 1.10，导致 sherpa 报 `version [27] ... only 1 to 10` | 这是 C API DLL 冲突，不是模型版本；Provider 必须在 import sherpa 前注册 ASR 环境的 `onnxruntime/capi` DLL 目录，真实模型加载测试不可跳过。 |
 | 4 | sqlite3/aiosqlite 驱动 legacy 事务模式会把最外层 `RELEASE SAVEPOINT` 变成 COMMIT，静默破坏 `begin_nested()`（P3 配对写入依赖它）；`WAL` PRAGMA 不能在事务内执行；begin 事件监听器里抛出的驱动错误不做 SQLAlchemy 包装（`_begin_impl` 的 dispatch 在 try 之外） | `storage/db.py` 严格按官方 recipe：connect 事件设 `isolation_level = None`（禁驱动隐式 BEGIN）+ begin 事件显式发 `BEGIN`；**不得**再叠加引擎级 `isolation_level="AUTOCOMMIT"`（与手动 BEGIN 钩子互斥）。WAL PRAGMA 在 connect 事件跑（aiosqlite 游标方法须走 `await_` 桥）。需要 `BEGIN IMMEDIATE` 的代码走受控 execution option（`db.BEGIN_IMMEDIATE_OPTION` + `session.connection(execution_options=...)`，见 `application/submit.py`），禁止在 Session 管理的连接上手写 COMMIT/BEGIN。 |
 | 5 | WAL 下 deferred 事务「先读后写」：另一写者在其读快照建立后提交，写升级得到**不可重试**的 `BUSY_SNAPSHOT`（`database is locked`，`busy_timeout` 对快照冲突不生效，5s 等待形同虚设）；曾以「启动对账新增一次写库」必现 worker `INSERT` 失败 | 所有「先读后写」的事务以 `BEGIN IMMEDIATE` 开写，写锁只持毫秒级，长读阶段保持 deferred。四层纪律：①`db.immediate_write_transaction`（成功才 commit、任何异常含取消先 rollback 再 raise、finally 只恢复选项；**commit 经独立任务 shield 取消安全，verdict 等待必须循环 shield 抗重复取消**——取消可能落在 commit await 上而 SQLite 已落盘，第二次取消会穿透未 shield 的等待直接取消 commit task：成功保留新状态传播取消、失败才交调用方补偿）；②自持事务的 `storage/repository.py` 写函数入口 `_begin_immediate`（委托 `db.ensure_immediate_transaction`），**AST 结构守卫强制「守卫必须是函数体首语句」**；写检测用 **SQLite authorizer**（prepare 时数据库级报告**所有可能改变数据库或连接持久状态的动作**：DML、DDL、PRAGMA、REINDEX、ANALYZE、ATTACH/DETACH；读 PRAGMA 报同名动作码也计入——fail-closed；不计入仅纯读/函数调用/事务控制——SQL 字符串前缀匹配不可靠：注释前缀、WITH...UPDATE、触发器内部写入都会漏），且连接必须 `cached_statements=0`：authorizer 只在 prepare 时触发，sqlite3 默认按连接缓存 prepared statement，同一连接重复执行相同 SQL（参数化 DML 共享同一 SQL 字符串，池化连接上的常态）不再 prepare、authorizer 静默失明、guard 误判只读后用空 commit 发布写入：IMMEDIATE 内幂等返回 / 有写动作或 pending ORM 变更的 deferred **拒绝** / 只读 deferred **空 commit** 关闭（rollback 会 expire 调用方实例）；③重建扫描批两阶段：读取/解析在事务外；④协调文件双写的端点用 `commit=False` 让 commit 成为事务最后一步（补偿精确）。跨线程的写+补偿必须同步化（指针写/补偿在事件循环内直调），补偿覆盖取消。`report_repository` 的配对写不自持事务、归调用方管，**不得**在入口 commit。`execution_options` 参数是 TypedDict，不接受变量 key——必须用 `db.IMMEDIATE_WRITE_OPTS` 类型化别名。 |
+| 6 | MCP Python SDK（mcp 2.0.0）三个实测约束：①工具返回注记若是联合类型，SDK 兜底分支会把 structuredContent 包成 `{"result":...}`；②协议层对 `tools/list` 的 `Tool.outputSchema` 强制顶层 `type: object`——判别联合（RootModel oneOf）schema 没有顶层 `type`，**带它的工具在真实 stdio 线路上直接被拒**（进程内 `call_tool` 探不到，只有走 wire 才暴露）；③SDK 生成的参数模型默认 `extra='ignore'`，未知字段被静默丢弃 | ①信封以 JSON 文本内容交付（`structured_output=False`，ADR 0004 预案 A），`XxxResult` RootModel 联合只作运行时校验器（违规载荷降级 `BRIDGE_INTERNAL`）；升级 SDK 必须重跑 stdio 集成测试（`tests/integration/test_bridge_stdio.py`）而非只信进程内测试；②注册前收紧 `ArgModelBase.model_config = ConfigDict(extra='forbid')`（必须在工具注册前执行，行为由工具测试锁定）；③Bridge→Engine 的 httpx 客户端必须 `trust_env=False`，否则本机代理把死端口翻译成 502、掩盖 `ENGINE_NOT_READY`。另：pydantic-settings 的 `validation_alias` 不吃 `env_prefix`，`EVOBLUE_LOCAL_TOKEN` 别名需在 `AliasChoices` 中显式列出全名，且字段名也要进 choices（否则 init kwarg 路径失效）。 |
+| 7 | Git Bash（MSYS）在 Windows 下会把传给子进程/heredoc 的反斜杠路径改写成正斜杠（`f:\x\y` → `f://x/y` 或 `f:/x/y`）；WorkBuddy 接入时曾三次写入失败 | 让 Python 写 Windows 路径时，路径字面量用 `chr(92)` 拼接或经环境变量/JSON 传入，不经过 bash 字面转义；写入后必须回读实际字节验证。项目自身的脚本（`scripts/verify_p4_clients.py`）不经 bash 改写路径，优先用它们。 |
 
 ## Architecture Decisions
 
+- **P4 信封所有权在 MCP 层**（ADR 0004）：工具返回统一为 `ok:true` 平铺字段 / `ok:false` + `error{code,message,retryable,detail}`，`isError` 恒 false（领域失败是正常回答）；以 JSON 文本内容交付（协议 outputSchema 约束，见 Gotcha #6）。旧 REST 端点信封不动——翻译正是薄适配器的职责；`/api/diagnostics` 从出生用 P3 结构化信封。`docs/MCP_TOOLS.md` §0.2 十五错误码表是唯一权威清单，`STABLE_ERROR_CODES` 漂移测试锁定。
+- **Bridge 不自动拉起 Engine**：Engine 离线返回 `ENGINE_NOT_READY`（retryable）+ 启动指引；单实例约束 = 一个端口一个 Engine（绑定失败即退出），锁文件与自动拉起归 P7。
 - **Local Engine 是唯一状态所有者**：SQLite、Worker、Pipeline、WebUI 和报告都在 Engine 内，关闭 AI 客户端不会中断已提交任务。
 - **STDIO MCP Bridge 是薄适配器**：只校验参数并调用 `127.0.0.1` Engine；不直接碰数据库、下载器、FFmpeg 或 LLM，避免多客户端重复执行与状态分裂。
 - **异步任务合同**：提交立即返回 `job_id`，再轮询状态/报告，规避 MCP 客户端约 60 秒工具超时。

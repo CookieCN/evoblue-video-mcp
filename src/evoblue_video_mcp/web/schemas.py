@@ -230,3 +230,96 @@ class IndexRebuildRequest(StrictModel):
 
 class IndexRebuildAcceptedResponse(StrictModel):
     state: str
+
+
+# --- P4 diagnostics (docs/MCP_TOOLS.md §7) ---
+
+
+class DiagnosticCheckResponse(StrictModel):
+    name: str
+    status: Literal["pass", "warning", "fail", "skipped"]
+    message: str
+    detail: str | None = None
+
+
+class DiagnosticsResponse(StrictModel):
+    engine_version: str
+    overall: Literal["pass", "warning", "fail"]
+    checks: list[DiagnosticCheckResponse]
+    redacted: Literal[True] = True
+
+
+# --- P5 client config (docs/CLIENT_CONFIG_WRITE_CONTRACT.md §7/§8) ---
+
+
+class CopyableConfigResponse(StrictModel):
+    client_id: str
+    format: Literal["toml", "json", "cli"]
+    config_text: str
+    target_path: str | None = None
+    steps: tuple[str, ...] = ()
+
+
+class ClientStatusResponse(StrictModel):
+    client_id: str
+    display_name: str
+    tier: Literal["file_auto", "cli", "manual"]
+    target_present: bool | None = None
+    installed: bool | None = None
+    entry_matches_current: bool | None = None
+    config_supported: bool = True
+    handshake: Literal["verified", "unverified", "failed"]
+    handshake_reason: str | None = None
+    handshake_checked_at: float | None = None
+    engine_online: bool | None = None
+    other_server_count: int | None = None
+    backup_count: int = 0
+    notes: tuple[str, ...] = ()
+
+
+class ClientListResponse(StrictModel):
+    clients: list[ClientStatusResponse]
+    display_labels: dict[str, str]
+
+
+class ClientOperationRequest(StrictModel):
+    force: bool = False
+
+
+class ClientRemoveRequest(StrictModel):
+    confirm: bool = False
+
+
+class ClientRestoreRequest(StrictModel):
+    backup_name: str
+    confirm: bool = False
+
+
+class ClientOperationResponse(StrictModel):
+    client_id: str
+    operation: str
+    performed: bool
+    installed: bool | None = None
+    entry_matches_current: bool | None = None
+    handshake: Literal["verified", "unverified", "failed"]
+    handshake_reason: str | None = None
+    handshake_checked_at: float | None = None
+    backup_name: str | None = None
+    restored_from: str | None = None
+    safety_backup: str | None = None
+    removed_target: bool | None = None
+    copyable: CopyableConfigResponse | None = None
+    message: str = ""
+
+
+class BackupInfoResponse(StrictModel):
+    name: str
+    created_at: float
+    size_bytes: int
+    sha256: str
+    was_absent: bool = False
+    matches_current: bool | None = None
+
+
+class BackupListResponse(StrictModel):
+    items: list[BackupInfoResponse]
