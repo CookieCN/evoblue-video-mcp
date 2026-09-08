@@ -90,7 +90,8 @@ jobs:
             try {
               Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -TimeoutSec 3 | Out-Null
             } catch {
-              $unauth = "$_" -match "401"
+              $statusCode = $_.Exception.Response.StatusCode
+              $unauth = $null -ne $statusCode -and [int]$statusCode -eq 401
             }
             if (-not $unauth) { throw "models answered without a token" }
             Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -Headers @{ "X-Local-Token" = $token } -TimeoutSec 3 | Out-Null

@@ -17,14 +17,14 @@ import check_release_tag  # noqa: E402
 
 
 def test_current_tag_matches(monkeypatch, capsys) -> None:
-    assert check_release_tag.main(["v0.9.0-beta.2"]) == 0
+    assert check_release_tag.main(["v0.9.0-beta.3"]) == 0
     assert "matches" in capsys.readouterr().out
 
 
 def test_wrong_tag_rejected() -> None:
-    assert check_release_tag.main(["v0.9.0-beta.3"]) == 1
+    assert check_release_tag.main(["v0.9.0-beta.4"]) == 1
 
 
 def test_raw_pep440_form_also_matches() -> None:
     # accepting the PEP 440 spelling keeps local tooling ergonomic
-    assert check_release_tag.main(["v0.9.0b2"]) == 0
+    assert check_release_tag.main(["v0.9.0b3"]) == 0

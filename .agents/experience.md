@@ -249,3 +249,13 @@
 **Solution**：每个 Engine 创建后立即登记，外层 `finally` 逆序停止全部实例，再删除临时目录；模型目录门禁从脆弱的数量断言升级为精确 model_id 集合。
 
 **Rule**：会启动进程或占端口的验证脚本，资源登记必须先于可能失败的操作，且唯一清理责任放在最外层 `finally`；重跑前若端口异常，只能按已核实的可执行文件路径清理精确进程。
+
+## 27. HTTP 门禁必须读状态码——错误文本不是协议
+
+**Problem**：GitHub Windows smoke 中引擎正确对无 token 请求返回 401，但脚本用 `"$_" -match "401"` 判断，PowerShell/GitHub runner 的错误文本形态变化后误报为“未鉴权也能访问”，阻断草稿 Release。
+
+**Root Cause**：把面向人的异常文案当成机器合同；同一 runner 上更早的 `verify_release.py` 已用 HTTP status 证明应用行为正确，失败来自重复 smoke 的脆弱断言。
+
+**Solution**：从 `Exception.Response.StatusCode` 读取结构化状态并转为整数精确比较 401；保留独立 bundle 验证作为交叉证据。
+
+**Rule**：HTTP、退出码、JSON 字段等机器可读信号一律直接比较结构化值，禁止从本地化或版本可变的异常文本中用正则猜结果。

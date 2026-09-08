@@ -4,6 +4,7 @@
 
 ### Added
 
+- Release 版本升级到 `0.9.0b3` / `0.9.0-beta.3`；修复 GitHub Windows smoke 以 `Exception.Response.StatusCode` 精确判断 401，避免 PowerShell 错误文本格式变化把正确鉴权误报为失败。beta.2 的同 runner `verify_release.py` 已先证明引擎实际返回 401。
 - Release 版本升级到 `0.9.0b2` / `0.9.0-beta.2`，用于区分包含 Qwen3-ASR 国内安装选项的新安装包与已发布的 beta.1 产物；Windows setup/portable zip 已构建并通过发行验证，校验和回算一致。
 - `scripts/verify_release.py` 的模型门禁改为精确校验四个内置 model_id 与 Qwen 非正式默认标志；所有已启动测试引擎在失败路径也会回收，避免遗留进程污染下一轮验证。
 
