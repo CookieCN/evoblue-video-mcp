@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-**当前发行版本：0.9.0b2 / 0.9.0-beta.2。** 下方首段记录 ASR-5 功能完成、版本 bump 前的状态；beta.2 安装包构建与验证结果将在「最近完成」追加。
+**当前发行版本：0.9.0b2 / 0.9.0-beta.2。** Windows 安装包与便携包已完成本地构建和发行验证；GitHub tag 构建负责生成跨平台产物与草稿 Release。
 
 **P7 + P8 + ASR-5 已交付（2026-09-08，全阶段功能 62/62 done，版本 0.9.0b1）**：ASR-5 新增可选 `Qwen3-ASR 0.6B INT8`，复用现有 sherpa-onnx full runtime，不引入 PyTorch/Transformers/vLLM；Model Manager 增加 `file-set` 安全交付（嵌套路径白名单、逐文件大小/SHA-256、总指纹、Range 续传、staging 原子晋升），固定 ModelScope 国内导出提交 `9c182309f7bb075f241424441add9e16c5086dfb`，总下载/安装 987,023,031 bytes。WebUI 模型页和设置 Provider 均出现 Qwen3 选项；路由仅在它已安装时复用，未安装时仍按既有正式门禁推荐 Standard/Whisper。Qwen3 未跑 EvoBlue 独立质量/CPU/内存门禁，故保持非正式默认。旧 `0.9.0-beta.1` 安装包不含本次代码，需重建后才能交付。下段为 P7/P8 原交付记录。
 
@@ -24,6 +24,7 @@ ASR-0～ASR-3 已完成。Windows 真实引擎阻塞已定位为 System32 的 ON
 
 ## 最近完成
 
+- [x] beta.2 Windows 发行产物（2026-09-08）：`EvoBlueVideoMCP-0.9.0-beta.2-setup.exe` 46.7 MiB、便携 zip 59.3 MiB，`SHA256SUMS.txt` 回算一致；打包引擎健康检查、生产 token、四个内置模型精确集合（含 Qwen3）、审批标志、401/200 权限与 frozen MCP Bridge 握手全部通过。修复 `verify_release.py` 的旧三模型断言，并确保任何断言失败也回收已启动的验证引擎。损坏模型隔离因本机无真实模型目录按合同 SKIP；Qwen 约 941 MiB 全模型真实转写仍是外部测试门。
 - [x] ASR-5 Qwen3-ASR 可选模型（2026-09-08）：国内固定提交 Range 探针 206；`file-set` 下载/校验/原子安装、原生 sherpa 工厂、注册/路由/API/WebUI 全链路落地。最终验证：后端 **710 passed + 7 skipped**；Ruff 全绿；mypy strict 101 files；前端 ESLint + **17 tests** + production build 全绿；`uv lock --check` 与 Harness 62/62 计数通过。未执行约 941 MiB 全模型真实转写和安装器重建，保留为发布前人工门。
 - [x] P7+P8 发布评审第三轮修复（2026-09-08，关闭「已完成状态可经部分更新绕过校验」P1）：可运行不变量的触发条件从「载荷显式 `setup_completed=true`」改为**最终状态** `payload.setup_completed ?? current.setup_completed` 为 true——已完成记录上省略该字段删 Key / 切 Provider / 清空模型的局部更新同样 400 拒绝且库与 keyring 双不变；显式 `setup_completed=false` 是唯一合法降级出口（Key 删除随之放行）。新增回归用例四段：删 Key 拒绝（断言 DB+keyring 双不变）、切 Provider 拒绝（不变）、保可运行性的局部更新放行（report_directory）、显式降级 200（setup_completed=false + keyring 清空）。连带适配 `test_index_rebuild` 六个 settings-PUT 用例（夹具按新契约补可运行 LLM + 工作凭据库），并把 post-commit 用例的 `entered.wait()` 加 10s 上界——该测试曾因门禁 400 而永久挂起，这正是全量套件「卡在 19%」的根因；教训：测试内的无界事件等待必须带超时，回归应失败而非挂死。最终 **704 passed + 7 skipped 两轮 exit 0**（串行）+ mypy strict 101 + ruff + 产物重建 + verify_release（含 frozen bridge 握手）全绿。
 - [x] P7+P8 发布评审第二轮修复（2026-09-08，关闭 1 P1 的前后端两层）：**前端** `setupReady` 纳入 Key 门控——`keyProvided || keyAlreadyOk`，`keyAlreadyOk` 仅当「Provider 未变 且 `llm_api_key_configured=true`」成立，切 Provider 必填新 Key，API Key 标签状态化（必填/已配置留空）；**后端** `PUT /api/settings` 在任何副作用（keyring 写、指针写、库提交）之前校验「合并后字段 + keyring 实际结果」满足 `ProductionHandlerFactory` 同款可运行门禁，`setup_completed=true` 不满足即 400 拒绝——含显式空 Key（删除语义）不得借旧 Key 放行的缺口；**测试** 后端 4 个不变量用例（裸完成拒绝且不落库、缺 Key 拒绝、切 Provider 拒绝→带新 Key 通过、空 Key 删除语义拒绝、同 Provider 已配置可裸完成），前端 3 个场景（fresh 未填 Key 禁用、同 Provider 已配置可留空、切 Provider 禁用直到填新 Key）。两个旧 roundtrip 测试按新契约补全 LLM 四要素。全量 699+skipped 两轮（串行）+ 前端 17 测试/lint/build + 产物重建 + verify_release/验收复跑。

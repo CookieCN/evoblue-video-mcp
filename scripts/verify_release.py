@@ -190,9 +190,11 @@ def verify(bundle, port, models_dir):
         real_models = None
 
     work = Path(tempfile.mkdtemp(prefix="evoblue-verify-"))
+    engines = []
     try:
         print("1. fresh-profile boot + shipped approval flags")
         engine = Engine(bundle, port, work / "fresh")
+        engines.append(engine)
         engine.start()
         status, health = http_get(f"http://127.0.0.1:{port}/api/health")
         check(
@@ -212,17 +214,29 @@ def verify(bundle, port, models_dir):
             token=fresh_token.read_text(encoding="utf-8").strip(),
         )
         items = models.get("items", []) if isinstance(models, dict) else []
-        check("models list has 3 built-ins", status == 200 and len(items) == 3)
         by_id = {item["model_id"]: item for item in items}
+        expected_model_ids = {
+            "zipformer-ctc-small-zh-int8",
+            "sensevoice-small-int8",
+            "qwen3-asr-0.6b-int8",
+            "whisper-cpp-base",
+        }
+        check(
+            "models list contains every built-in",
+            status == 200 and set(by_id) == expected_model_ids,
+            detail=f"found {sorted(by_id)}",
+        )
         flags_ok = (
             by_id.get("sensevoice-small-int8", {}).get("formal_default") is True
             and by_id.get("zipformer-ctc-small-zh-int8", {}).get("formal_default") is False
+            and by_id.get("qwen3-asr-0.6b-int8", {}).get("formal_default") is False
         )
         check("approval flags ship in the bundle", flags_ok)
         engine.stop()
 
         print("2. production token behavior")
         engine2 = Engine(bundle, port, work / "prod")
+        engines.append(engine2)
         engine2.start(production=True)
         token_file = engine2.workdir / "data" / "local_token"
         token = token_file.read_text(encoding="utf-8").strip()
@@ -248,6 +262,7 @@ def verify(bundle, port, models_dir):
             )
             bad_model.write_bytes(b"corrupt")
             engine3 = Engine(bundle, port, work / "isolated")
+            engines.append(engine3)
             engine3.start(models_dir=corrupt_root / "models", production=True)
             status, _health = http_get(f"http://127.0.0.1:{port}/api/health")
             check("engine stays healthy with a corrupt model", status == 200)
@@ -259,11 +274,14 @@ def verify(bundle, port, models_dir):
 
         print("4. frozen bridge subcommand handshake")
         engine4 = Engine(bundle, port, work / "bridge")
+        engines.append(engine4)
         engine4.start(production=True)
         bridge_ok, bridge_detail = _bridge_handshake(engine4)
         check("bridge handshake ok", bridge_ok, detail=bridge_detail)
         engine4.stop()
     finally:
+        for running_engine in reversed(engines):
+            running_engine.stop()
         shutil.rmtree(work, ignore_errors=True)
 
 

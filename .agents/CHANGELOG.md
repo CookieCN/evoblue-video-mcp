@@ -4,7 +4,8 @@
 
 ### Added
 
-- Release 版本升级到 `0.9.0b2` / `0.9.0-beta.2`，用于区分包含 Qwen3-ASR 国内安装选项的新安装包与已发布的 beta.1 产物。
+- Release 版本升级到 `0.9.0b2` / `0.9.0-beta.2`，用于区分包含 Qwen3-ASR 国内安装选项的新安装包与已发布的 beta.1 产物；Windows setup/portable zip 已构建并通过发行验证，校验和回算一致。
+- `scripts/verify_release.py` 的模型门禁改为精确校验四个内置 model_id 与 Qwen 非正式默认标志；所有已启动测试引擎在失败路径也会回收，避免遗留进程污染下一轮验证。
 
 - ASR-5 Qwen3-ASR 可选模型（2026-09-08）：新增 `qwen3-asr-0.6b-int8@2026-03-25` 与 WebUI/设置 Provider 选项，复用 sherpa-onnx 原生 `from_qwen3_asr`；Model Manager 新增多文件 `file-set` 合同与安全安装链（安全嵌套路径、逐文件 SHA-256/大小、集合指纹、Range 续传、原子晋升）。国内源固定到 ModelScope ONNX 导出提交 `9c182309f7bb075f241424441add9e16c5086dfb`，总计 987,023,031 bytes；实测固定 URL 返回 206 Range。Qwen3 只在已安装或用户明确固定时使用，独立门禁前不替换 Standard 正式默认；基础安装包体积不增加模型权重。
 
