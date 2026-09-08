@@ -7,7 +7,7 @@
 ## 当前阶段
 
 - 初始化日期：2026-08-24
-- 当前阶段：**P7 + P8 + ASR-5 已交付（2026-09-08），版本 0.9.0b4，全阶段功能 62/62 done**。P7：Windows 用户级安装器 + 便携 zip + Release 通道（合同 docs/INSTALLER_RELEASE_CONTRACT.md + ADR 0006；frozen=production、token fragment 引导、SPA catch-all、单实例退出码 3/4、引擎 exe bridge 子命令打包入口、迁移前 SQLite backup 快照、Inno Setup 真机验收 16/16、release.yml 草稿制发布）。P8：docs/HARDENING_MATRIX.md 15 行失败模式到护栏、worker_runtime 诊断检查 + 首页排队横幅、脱敏诊断导出、故障注入回归、docs/SUPPORT.md。ASR-5：可选 Qwen3-ASR 国内文件集安装。发布由 Owner 手动执行：bump 版本、push tag、CI 出草稿、审阅发布。
+- 当前阶段：**P7 + P8 + ASR-5 已交付（2026-09-08），版本 0.9.0b5，全阶段功能 62/62 done**。P7：Windows 用户级安装器 + 便携 zip + Release 通道（合同 docs/INSTALLER_RELEASE_CONTRACT.md + ADR 0006；frozen=production、token fragment 引导、SPA catch-all、单实例退出码 3/4、引擎 exe bridge 子命令打包入口、迁移前 SQLite backup 快照、Inno Setup 真机验收 16/16、release.yml 草稿制发布）。P8：docs/HARDENING_MATRIX.md 15 行失败模式到护栏、worker_runtime 诊断检查 + 首页排队横幅、脱敏诊断导出、故障注入回归、docs/SUPPORT.md。ASR-5：可选 Qwen3-ASR 国内文件集安装。发布由 Owner 手动执行：bump 版本、push tag、CI 出草稿、审阅发布。
 - P1–P4 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环、历史/FTS5/索引重建、STDIO MCP Bridge（七工具、信封统一、错误翻译矩阵、真实握手与多客户端幂等验收）；P6/ASR 全链路完成，Standard 已过审为正式默认模型。
 
 ## Owner Context

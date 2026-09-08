@@ -269,3 +269,13 @@
 **Solution**：Engine 停止后调用 `WaitForExit(15000)`；卸载器用 `WaitForExit(60000)`，超时强停并报稳定错误；正常退出后再轮询安装目录最多 30 秒，兼容 Inno 临时子进程延迟清理。
 
 **Rule**：CI 启动的每个外部进程都必须同时具备：明确退出动作、退出完成确认、硬超时、超时清理、最终状态断言；禁止裸 `-Wait`。
+
+## 29. Inno `[Code]` 的普通 MsgBox 不受静默参数控制
+
+**Problem**：安装器使用 `/VERYSILENT /SUPPRESSMSGBOXES` 卸载仍永久等待“是否删除个人数据”按钮，Windows runner 精确卡满 60 秒硬上限。
+
+**Root Cause**：Inno Setup 官方合同明确列出：Pascal `[Code]` 支持函数 `MsgBox` 与 `TaskDialogMsgBox` 属于五类不可抑制消息框；`/SUPPRESSMSGBOXES` 只有配合 `SuppressibleMsgBox` 才能返回调用方指定的默认值。
+
+**Solution**：数据删除确认改为 `SuppressibleMsgBox(..., IDNO)`，信息提示改为 `SuppressibleMsgBox(..., IDOK)`；新增合同测试禁止重新出现 `if MsgBox(`。
+
+**Rule**：任何需要支持无人值守安装/卸载的 Inno `[Code]` 对话框只能用 Suppressible 变体，并显式传入故障安全默认值；“默认按钮”不等于“静默默认返回值”。

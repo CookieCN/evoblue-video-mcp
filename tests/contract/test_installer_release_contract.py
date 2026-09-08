@@ -93,6 +93,13 @@ def test_autostart_value_name_matches_contract() -> None:
     assert "uninsdeletevalue" in iss
 
 
+def test_silent_uninstall_can_suppress_custom_data_prompts() -> None:
+    iss = _ISS.read_text(encoding="utf-8")
+    assert "SuppressibleMsgBox(" in iss
+    assert "MB_YESNO or MB_DEFBUTTON2, IDNO" in iss
+    assert "if MsgBox(" not in iss
+
+
 # §3 — single-instance: exit codes, mutex, lock payload.
 
 

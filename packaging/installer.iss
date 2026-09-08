@@ -110,15 +110,15 @@ begin
     // Optional data wipe: default is KEEP (No, MB_DEFBUTTON2); silent
     // uninstalls take the default - user data is never removed without an
     // explicit interactive Yes (contract section 2).
-    if MsgBox(
+    if SuppressibleMsgBox(
         '是否同时删除个人数据（分析报告、数据库、已安装的语音模型）？' #13#10 #13#10 +
         '选「否」只移除程序，个人数据保留。',
-        mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+        mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
     begin
       if (DataDir <> '') and DirExists(DataDir) then
       begin
         DelTree(DataDir, True, True, True);
-        MsgBox('个人数据已删除。', mbInformation, MB_OK);
+        SuppressibleMsgBox('个人数据已删除。', mbInformation, MB_OK, IDOK);
       end;
     end;
   end;

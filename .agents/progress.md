@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-**当前发行版本：0.9.0b4 / 0.9.0-beta.4。** beta.3 已关闭结构化 401 卡点，但 Windows runner 的静默卸载无超时卡住；beta.4 等待 Engine 确认退出，并为卸载器增加 60 秒硬超时与安装目录移除轮询。
+**当前发行版本：0.9.0b5 / 0.9.0-beta.5。** beta.4 证明卸载器被 `[Code]` 普通 `MsgBox` 阻塞；beta.5 改为 `SuppressibleMsgBox(..., IDNO)`，交互卸载仍询问，静默卸载确定性保留数据。
 
 **P7 + P8 + ASR-5 已交付（2026-09-08，全阶段功能 62/62 done，版本 0.9.0b1）**：ASR-5 新增可选 `Qwen3-ASR 0.6B INT8`，复用现有 sherpa-onnx full runtime，不引入 PyTorch/Transformers/vLLM；Model Manager 增加 `file-set` 安全交付（嵌套路径白名单、逐文件大小/SHA-256、总指纹、Range 续传、staging 原子晋升），固定 ModelScope 国内导出提交 `9c182309f7bb075f241424441add9e16c5086dfb`，总下载/安装 987,023,031 bytes。WebUI 模型页和设置 Provider 均出现 Qwen3 选项；路由仅在它已安装时复用，未安装时仍按既有正式门禁推荐 Standard/Whisper。Qwen3 未跑 EvoBlue 独立质量/CPU/内存门禁，故保持非正式默认。旧 `0.9.0-beta.1` 安装包不含本次代码，需重建后才能交付。下段为 P7/P8 原交付记录。
 
@@ -24,6 +24,7 @@ ASR-0～ASR-3 已完成。Windows 真实引擎阻塞已定位为 System32 的 ON
 
 ## 最近完成
 
+- [x] beta.5 Windows 本地发行产物（2026-09-08）：setup 46.7 MiB、便携 zip 59.3 MiB；安装器改用可抑制卸载提示并新增合同守卫，打包引擎四模型/鉴权/Bridge 验证通过，SHA256 回算一致。静默安装→卸载保数据由 GitHub Windows smoke 做最终独立验证。
 - [x] beta.4 Windows 本地发行产物（2026-09-08）：setup 46.7 MiB、便携 zip 59.3 MiB；四模型精确集合、正式默认标志、生产 token、401/200 权限与 frozen MCP Bridge 握手全部通过，SHA256 回算一致。CI 生命周期治理新增 Engine 退出确认、卸载器 60 秒硬超时与目录移除轮询。
 - [x] beta.3 Windows 发行重建（2026-09-08）：定位 beta.2 GitHub Run `34207113992` 为 CI 假失败——同 runner 的正式 `verify_release.py` 已验证无 token 返回 401，重复 smoke 却用错误文本正则猜状态；改为读取 `Exception.Response.StatusCode`。新 setup 46.6 MiB、便携 zip 59.3 MiB，四模型/鉴权/Bridge 发行验证通过，SHA256 回算一致。
 - [x] beta.2 Windows 发行产物（2026-09-08）：`EvoBlueVideoMCP-0.9.0-beta.2-setup.exe` 46.7 MiB、便携 zip 59.3 MiB，`SHA256SUMS.txt` 回算一致；打包引擎健康检查、生产 token、四个内置模型精确集合（含 Qwen3）、审批标志、401/200 权限与 frozen MCP Bridge 握手全部通过。修复 `verify_release.py` 的旧三模型断言，并确保任何断言失败也回收已启动的验证引擎。损坏模型隔离因本机无真实模型目录按合同 SKIP；Qwen 约 941 MiB 全模型真实转写仍是外部测试门。
