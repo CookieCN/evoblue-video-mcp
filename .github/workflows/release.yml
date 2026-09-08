@@ -86,14 +86,9 @@ jobs:
             if (-not $health -or $health.status -ne "ok") { throw "health never went ok" }
             $token = (Get-Content (Join-Path $data "local_token") -Raw).Trim()
             if (-not $token) { throw "local_token missing" }
-            $unauth = $false
-            try {
-              Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -TimeoutSec 3 | Out-Null
-            } catch {
-              $statusCode = $_.Exception.Response.StatusCode
-              $unauth = $null -ne $statusCode -and [int]$statusCode -eq 401
-            }
-            if (-not $unauth) { throw "models answered without a token" }
+            $probe = Invoke-WebRequest -Uri "http://127.0.0.1:8899/api/models" -TimeoutSec 3 -SkipHttpErrorCheck
+            Write-Host ("models without token -> HTTP {0}: {1}" -f $probe.StatusCode, $probe.Content.Substring(0, [Math]::Min(300, $probe.Content.Length)))
+            if ($probe.StatusCode -ne 401) { throw "expected 401 without token, got $($probe.StatusCode)" }
             Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -Headers @{ "X-Local-Token" = $token } -TimeoutSec 3 | Out-Null
           } catch {
             if (Test-Path "$env:RUNNER_TEMP/engine-err.log") {
