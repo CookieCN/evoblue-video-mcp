@@ -259,3 +259,13 @@
 **Solution**：从 `Exception.Response.StatusCode` 读取结构化状态并转为整数精确比较 401；保留独立 bundle 验证作为交叉证据。
 
 **Rule**：HTTP、退出码、JSON 字段等机器可读信号一律直接比较结构化值，禁止从本地化或版本可变的异常文本中用正则猜结果。
+
+## 28. 外部进程 smoke 必须有退出等待和硬超时
+
+**Problem**：Windows smoke 强停 Engine 后立即启动 Inno 卸载器，既没有确认 Engine/mutex 已释放，也用无超时 `Start-Process -Wait`；runner 卡在卸载步骤且无法产出失败证据。
+
+**Root Cause**：生命周期只覆盖“发出终止/等待命令”，没有覆盖“目标状态已达成”和治理上限；异常路径会把有限测试变成无限等待。
+
+**Solution**：Engine 停止后调用 `WaitForExit(15000)`；卸载器用 `WaitForExit(60000)`，超时强停并报稳定错误；正常退出后再轮询安装目录最多 30 秒，兼容 Inno 临时子进程延迟清理。
+
+**Rule**：CI 启动的每个外部进程都必须同时具备：明确退出动作、退出完成确认、硬超时、超时清理、最终状态断言；禁止裸 `-Wait`。

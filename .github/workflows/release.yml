@@ -102,13 +102,22 @@ jobs:
             throw
           } finally {
             if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+            if (-not $p.WaitForExit(15000)) { throw "engine did not exit after Stop-Process" }
           }
       - name: Smoke - silent uninstall keeps user data
         shell: pwsh
         run: |
           $data = Join-Path $env:RUNNER_TEMP "evoblue-data"
-          $proc = Start-Process -FilePath "$env:EVO_INSTALL_DIR/unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          $proc = Start-Process -FilePath "$env:EVO_INSTALL_DIR/unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -PassThru
+          if (-not $proc.WaitForExit(60000)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "uninstaller did not exit within 60 seconds"
+          }
           if ($proc.ExitCode -ne 0) { throw "uninstaller exit $($proc.ExitCode)" }
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Test-Path $env:EVO_INSTALL_DIR) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 1
+          }
           if (Test-Path $env:EVO_INSTALL_DIR) { throw "install dir still present" }
           if (-not (Test-Path (Join-Path $data "local_token"))) { throw "user data must survive a silent uninstall" }
       - uses: actions/upload-artifact@v4
