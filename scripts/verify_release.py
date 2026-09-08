@@ -49,7 +49,17 @@ def http_get(url, token=None, timeout=5.0):
         return exc.code, exc.read().decode("utf-8", "replace")
 
 
-def wait_for_health(port, deadline_s=90.0):
+def dump_engine_log(log_path):
+    """Print the engine's own output - the only witness of a boot crash."""
+    try:
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+    except OSError:
+        tail = "<engine log missing>"
+    print("--- engine.log tail ---")
+    print(tail)
+
+
+def wait_for_health(port, deadline_s=90.0, proc=None, log_path=None):
     deadline = time.monotonic() + deadline_s
     url = f"http://127.0.0.1:{port}/api/health"
     last_error = ""
@@ -61,7 +71,16 @@ def wait_for_health(port, deadline_s=90.0):
             status, body = 0, None
         if status == HTTPStatus.OK and isinstance(body, dict) and body.get("status") == "ok":
             return
+        if proc is not None and proc.poll() is not None:
+            # the engine DIED - waiting longer cannot help; show why
+            if log_path is not None:
+                dump_engine_log(log_path)
+            raise SystemExit(
+                f"engine exited early with code {proc.returncode} while waiting for {url}"
+            )
         time.sleep(0.5)
+    if log_path is not None:
+        dump_engine_log(log_path)
     raise SystemExit(f"engine did not become healthy within {deadline_s}s: {url} ({last_error})")
 
 
@@ -101,7 +120,7 @@ class Engine:
             env=env,
             cwd=str(self.workdir),
         )
-        wait_for_health(self.port)
+        wait_for_health(self.port, proc=self.proc, log_path=self.log_path)
 
     def stop(self):
         if self.proc is not None and self.proc.poll() is None:
