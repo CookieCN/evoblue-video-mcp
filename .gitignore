@@ -37,3 +37,4 @@ benchmarks/_work/
 # Foreign agent-session worktrees checked out inside the repo (remove via
 # `git worktree remove` in the owning repo, never by deleting the directory)
 .codex-worktrees/
+tmp-fetch-log.ps1
