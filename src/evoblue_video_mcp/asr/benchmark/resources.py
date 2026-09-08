@@ -52,8 +52,10 @@ class _ProcessMemoryCounters(ctypes.Structure):
 
 def _win32_peak_rss() -> int | None:
     try:
-        psapi = ctypes.WinDLL("psapi", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # getattr keeps the mypy pass platform-neutral (WinDLL is win32-only
+        # in the stubs; this function only ever runs on Windows)
+        psapi = getattr(ctypes, "WinDLL")("psapi", use_last_error=True)  # noqa: B009
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
         # Explicit signatures: the current-process pseudo-handle is 64-bit, and
         # ctypes' default int truncation makes the API fail silently.
         kernel32.GetCurrentProcess.restype = ctypes.c_void_p

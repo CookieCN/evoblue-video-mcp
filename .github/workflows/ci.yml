@@ -18,6 +18,8 @@ jobs:
       - run: uv sync --extra dev
       - run: uv run ruff check .
       - run: uv run mypy src
+      # the dev machines are Windows: guard the win32 typing view too
+      - run: uv run mypy --platform win32 src
       - run: uv run pytest
 
   frontend:

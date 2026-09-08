@@ -30,6 +30,11 @@ jobs:
       EVOBLUE_OPEN_UI: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Defender exclusions for unsigned build output (runner user is admin)
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath $env:RUNNER_TEMP -ErrorAction SilentlyContinue
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
