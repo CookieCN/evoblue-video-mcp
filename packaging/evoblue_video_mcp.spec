@@ -29,6 +29,10 @@ hiddenimports = [
     # sqlalchemy resolves the sqlite dialect and its async driver at runtime
     "sqlalchemy.dialects.sqlite",
     "aiosqlite",
+    # the bridge chain is only reached dynamically (the "bridge" subcommand of
+    # the engine exe dispatches to mcp.__main__), so the static analysis never
+    # follows it - pull it in explicitly or frozen bridges fail with ImportError
+    "evoblue_video_mcp.mcp.__main__",
     # keyring's platform backend is imported lazily
     "keyring.backends.Windows",
     "keyring.backends.macOS",

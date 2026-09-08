@@ -11,7 +11,11 @@
 ## Bridge 启动合同（P4 冻结）
 
 - 主形态：`command = <venv>\Scripts\python.exe`（Windows）/ `<venv>/bin/python`（POSIX），`args = ["-m", "evoblue_video_mcp.mcp"]`。**不使用 `uv run` 作为主形态**——多个客户端并发拉起会争 uv 锁并触发依赖同步检查，启动延迟直接叠加到每次工具调用。
-- 备选形态：`evoblue-bridge` console script（`uv tool install` / `pipx` 场景）；PyInstaller exe 形态归 P7。
+- 备选形态：`evoblue-bridge` console script（`uv tool install` / `pipx` 场景）。
+- 打包形态（P7 冻结，INSTALLER_RELEASE_CONTRACT §5）：`command = <引擎exe路径>`，
+  `args = ["bridge"]`（引擎 exe 的 `bridge` 子命令等价于 `python -m
+  evoblue_video_mcp.mcp`）；env 仅在端口 ≠ 8765 时含 `EVOBLUE_ENGINE_PORT`，
+  永不写 token。与主形态互斥：frozen 进程用打包形态，源码/venv 进程用主形态。
 - 环境变量（均可选）：`EVOBLUE_ENGINE_PORT`（默认 8765）、`EVOBLUE_LOCAL_TOKEN`（开发/测试直配）、`EVOBLUE_DATA_DIRECTORY`（token 文件定位，默认系统用户数据目录）。
 - token 发现顺序（只读；Bridge 永不生成或写 token 文件）：① `EVOBLUE_LOCAL_TOKEN` → ② `<data_directory>/local_token` → ③ 无 token 直连（development Engine 无鉴权）。收到 401 → `ENGINE_UNAUTHORIZED`，提示「在 WebUI 重新完成本机配对」。
 - Engine 离线：返回 `ENGINE_NOT_READY`（retryable），message 指引先启动 EvoBlue Local Engine；P4 不自动拉起 Engine（ADR 0004）。

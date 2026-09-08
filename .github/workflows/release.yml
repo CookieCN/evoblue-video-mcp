@@ -1,0 +1,192 @@
+# Release pipeline (P7, INSTALLER_RELEASE_CONTRACT section 7): a tag push
+# builds the packaging matrix, runs the release verifications, and creates a
+# DRAFT GitHub Release with every artifact plus checksums. Publishing stays
+# owner-gated and manual - CI never publishes.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify-tag:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - name: tag must equal the pyproject version (npm-normalized)
+        run: uv run python scripts/check_release_tag.py "$GITHUB_REF_NAME"
+
+  build-windows:
+    needs: verify-tag
+    runs-on: windows-latest
+    env:
+      EVOBLUE_OPEN_UI: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: uv sync --extra dev --extra package --extra asr
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - name: Record artifact names from the pyproject version
+        run: uv run python scripts/record_artifact_names.py >> "$GITHUB_ENV"
+        shell: bash
+      - name: Build packaging matrix (base keeps the ASR delta measurable)
+        run: uv run python scripts/build_package.py --variants "base,full"
+      - name: Release verification on the full bundle
+        run: uv run python scripts/verify_release.py dist/evoblue-video-mcp-full
+      - name: Build installer + portable zip + checksums
+        run: uv run python scripts/build_installer.py --skip-package
+      - name: Smoke - silent install into a runner temp dir
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP "evoblue-install"
+          $proc = Start-Process -FilePath "dist/$env:SETUP_NAME" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dest" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "installer exit $($proc.ExitCode)" }
+          if (-not (Test-Path "$dest/evoblue-engine-full.exe")) { throw "engine exe missing" }
+          "EVO_INSTALL_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Smoke - installed engine boots, health + token gate
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "evoblue-data"
+          $env:EVOBLUE_DATA_DIRECTORY = $data
+          $env:EVOBLUE_ENVIRONMENT = "production"
+          $env:EVOBLUE_ENGINE_PORT = "8899"
+          $outLog = Join-Path $env:RUNNER_TEMP "engine-out.log"
+          $errLog = Join-Path $env:RUNNER_TEMP "engine-err.log"
+          $p = Start-Process -FilePath "$env:EVO_INSTALL_DIR/evoblue-engine-full.exe" -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+          try {
+            $health = $null
+            $deadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 2
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/health" -TimeoutSec 3
+                break
+              } catch { }
+            }
+            if (-not $health -or $health.status -ne "ok") { throw "health never went ok" }
+            $token = (Get-Content (Join-Path $data "local_token") -Raw).Trim()
+            if (-not $token) { throw "local_token missing" }
+            $unauth = $false
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -TimeoutSec 3 | Out-Null
+            } catch {
+              $unauth = "$_" -match "401"
+            }
+            if (-not $unauth) { throw "models answered without a token" }
+            Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -Headers @{ "X-Local-Token" = $token } -TimeoutSec 3 | Out-Null
+          } finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+      - name: Smoke - silent uninstall keeps user data
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "evoblue-data"
+          $proc = Start-Process -FilePath "$env:EVO_INSTALL_DIR/unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "uninstaller exit $($proc.ExitCode)" }
+          if (Test-Path $env:EVO_INSTALL_DIR) { throw "install dir still present" }
+          if (-not (Test-Path (Join-Path $data "local_token"))) { throw "user data must survive a silent uninstall" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evoblue-video-mcp-windows
+          path: |
+            dist/${{ env.SETUP_NAME }}
+            dist/${{ env.ZIP_NAME }}
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  build-macos:
+    needs: verify-tag
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: uv sync --extra dev --extra package --extra asr
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: uv run python scripts/build_package.py --variants "full"
+      - name: Zip the bundle
+        shell: bash
+        run: |
+          VERSION=$(uv run python scripts/emit_version.py)
+          NAME="evoblue-video-mcp-${VERSION/b/-beta.}-macos-full.zip"
+          (cd dist && zip -qry "$NAME" "evoblue-video-mcp-full")
+          shasum -a 256 "dist/$NAME" > "dist/$NAME.sha256"
+          echo "MAC_ZIP=$NAME" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evoblue-video-mcp-macos
+          path: dist/${{ env.MAC_ZIP }}*
+          if-no-files-found: error
+
+  build-linux:
+    needs: verify-tag
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: uv sync --extra dev --extra package --extra asr
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: uv run python scripts/build_package.py --variants "full"
+      - name: Zip the bundle
+        shell: bash
+        run: |
+          VERSION=$(uv run python scripts/emit_version.py)
+          NAME="evoblue-video-mcp-${VERSION/b/-beta.}-linux-full.zip"
+          (cd dist && zip -qry "$NAME" "evoblue-video-mcp-full")
+          sha256sum "dist/$NAME" > "dist/$NAME.sha256"
+          echo "LINUX_ZIP=$NAME" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evoblue-video-mcp-linux
+          path: dist/${{ env.LINUX_ZIP }}*
+          if-no-files-found: error
+
+  draft-release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create the draft release (owner publishes manually)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release for $GITHUB_REF_NAME already exists"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "EvoBlue Video MCP $GITHUB_REF_NAME" artifacts/evoblue-video-mcp-windows/* artifacts/evoblue-video-mcp-macos/* artifacts/evoblue-video-mcp-linux/*

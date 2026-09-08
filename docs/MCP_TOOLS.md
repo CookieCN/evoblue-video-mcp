@@ -271,7 +271,7 @@
 }
 ```
 
-检查名冻结枚举（P4；顺序即输出顺序）：`local_engine`、`engine_version`、`database`、`report_directory`、`disk_space`、`ffmpeg`、`yt_dlp`、`llm_config`、`llm_api`、`asr_runtime`、`gpu`、`asr_models`、`cookie_browser`。
+检查名冻结枚举（P4；顺序即输出顺序；P8 追加只增不改）：`local_engine`、`engine_version`、`database`、`report_directory`、`disk_space`、`ffmpeg`、`yt_dlp`、`llm_config`、`llm_api`、`asr_runtime`、`gpu`、`asr_models`、`cookie_browser`、`worker_runtime`。
 
 - `asr_runtime` 覆盖本地推理运行时（sherpa-onnx + onnxruntime）与 Provider 注册状态；`asr_models` 覆盖已安装模型与激活状态；`llm_api` 仅在 `include_network=true` 时执行，否则 `skipped`。
 

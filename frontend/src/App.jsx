@@ -1,16 +1,85 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Route, Routes } from "react-router-dom";
+
+const LOCAL_TOKEN_STORAGE_KEY = "evoblue.local_token";
+const TOKEN_FRAGMENT_KEY = "evoblue_token";
+const UNAUTHORIZED_EVENT = "evoblue:unauthorized";
+
+function readLocalToken() {
+  try {
+    return localStorage.getItem(LOCAL_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalToken(token) {
+  try {
+    localStorage.setItem(LOCAL_TOKEN_STORAGE_KEY, token);
+  } catch {
+    return;
+  }
+}
+
+function clearLocalToken() {
+  try {
+    localStorage.removeItem(LOCAL_TOKEN_STORAGE_KEY);
+  } catch {
+    return;
+  }
+}
+
+// P7 token bootstrap (INSTALLER_RELEASE_CONTRACT section 4): the engine opens
+// the UI at /#evoblue_token=<token>; the fragment never reaches the server or
+// its access log. Read it once, store it, then strip it from the address bar.
+function consumeTokenFragment() {
+  try {
+    const match = window.location.hash.match(
+      new RegExp("[#&]" + TOKEN_FRAGMENT_KEY + "=([^&]+)"),
+    );
+    if (match) {
+      saveLocalToken(decodeURIComponent(match[1]));
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  } catch {
+    return;
+  }
+}
+
+async function apiFetch(input, init = {}) {
+  const token = readLocalToken();
+  const headers = new Headers(init.headers || undefined);
+  if (token) headers.set("X-Local-Token", token);
+  const r = await fetch(input, { ...init, headers });
+  if (r.status === 401) {
+    clearLocalToken();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new Error("unauthorized");
+  }
+  return r;
+}
 
 function Home() {
   const [jobs, setJobs] = useState([]);
   const [error, setError] = useState(null);
+  const [settings, setSettings] = useState(null);
 
   useEffect(() => {
-    fetch("/api/jobs")
+    apiFetch("/api/jobs")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data) => setJobs(data.items ?? []))
       .catch((e) => setError(e.message));
+    // P8-002: surface why queued jobs are not starting (setup incomplete)
+    apiFetch("/api/settings")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(setSettings)
+      .catch(() => {});
   }, []);
+
+  const setupBlocked =
+    jobs.some((job) => job.status === "queued") &&
+    settings != null &&
+    settings.setup_completed === false;
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
@@ -45,6 +114,15 @@ function Home() {
 
       <section aria-label="分析记录" className="mt-10">
         <h2 className="text-lg font-medium text-slate-900">分析记录</h2>
+        {setupBlocked && (
+          <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+            有任务在排队但不会开始：请先完成
+            <Link to="/settings" className="underline">
+              初始设置
+            </Link>
+            。
+          </p>
+        )}
         {error ? (
           <p className="mt-4 rounded-xl bg-red-50 p-4 text-red-700">{error}</p>
         ) : jobs.length === 0 ? (
@@ -66,31 +144,99 @@ function Home() {
   );
 }
 
+const LLM_PRESETS = {
+  deepseek: { base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+};
+
 function Settings() {
   const [settings, setSettings] = useState(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
+  const [form, setForm] = useState({
+    llm_provider: "deepseek",
+    llm_base_url: "https://api.deepseek.com",
+    llm_model: "deepseek-chat",
+    llm_api_key: "",
+    report_directory: "",
+  });
+  const formLoaded = useRef(false);
 
   useEffect(() => {
-    fetch("/api/settings")
-      .then((r) => r.json())
-      .then(setSettings)
+    apiFetch("/api/settings")
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        setSettings(data);
+        // prefill the draft once with whatever is already configured
+        if (!formLoaded.current) {
+          formLoaded.current = true;
+          setForm((f) => ({
+            ...f,
+            llm_provider: data.llm_provider || f.llm_provider,
+            llm_base_url: data.llm_base_url || f.llm_base_url,
+            llm_model: data.llm_model || f.llm_model,
+            report_directory: data.report_directory || "",
+          }));
+        }
+      })
       .catch(() => {});
   }, []);
 
-  async function completeSetup() {
+  // P1 review round 2: completing setup requires a runnable LLM configuration
+  // — the worker refuses to claim jobs without these. The API Key is required
+  // unless the provider is UNCHANGED and the store already holds its key
+  // (switching providers points the credential ref at an empty slot).
+  const keyProvided = form.llm_api_key.trim().length > 0;
+  const keyAlreadyOk =
+    settings != null &&
+    settings.llm_api_key_configured === true &&
+    typeof settings.llm_provider === "string" &&
+    settings.llm_provider.trim().toLowerCase() ===
+      form.llm_provider.trim().toLowerCase();
+  const setupReady =
+    form.llm_provider.trim() &&
+    form.llm_base_url.trim() &&
+    form.llm_model.trim() &&
+    (keyProvided || keyAlreadyOk);
+
+  function pickProvider(provider) {
+    const preset = LLM_PRESETS[provider];
+    setForm((f) => ({
+      ...f,
+      llm_provider: provider,
+      llm_base_url: preset ? preset.base_url : f.llm_base_url,
+      llm_model: preset ? preset.model : f.llm_model,
+    }));
+  }
+
+  async function saveSetup() {
     setSaving(true);
     setMessage(null);
     try {
-      const r = await fetch("/api/settings", {
+      const body = {
+        llm_provider: form.llm_provider.trim(),
+        llm_base_url: form.llm_base_url.trim(),
+        llm_model: form.llm_model.trim(),
+        setup_completed: true,
+      };
+      const apiKey = form.llm_api_key.trim();
+      if (apiKey) body.llm_api_key = apiKey;
+      if (form.report_directory.trim()) {
+        body.report_directory = form.report_directory.trim();
+      }
+      const r = await apiFetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ setup_completed: true }),
+        body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       setSettings(data);
-      setMessage("设置已保存");
+      setForm((f) => ({ ...f, llm_api_key: "" }));
+      setMessage("设置已保存，排队任务将自动开始");
     } catch (e) {
       setMessage(`保存失败：${e.message}`);
     } finally {
@@ -98,11 +244,30 @@ function Settings() {
     }
   }
 
+  // P8-003: one-click redacted diagnostics export for bug reports
+  async function exportDiagnostics() {
+    setMessage(null);
+    try {
+      const r = await apiFetch("/api/diagnostics/export");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `evoblue-diagnostics-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setMessage("诊断信息已导出（已脱敏，可附在反馈里）");
+    } catch (e) {
+      setMessage(`导出失败：${e.message}`);
+    }
+  }
+
   async function saveAsrSettings() {
     setSaving(true);
     setMessage(null);
     try {
-      const r = await fetch("/api/settings", {
+      const r = await apiFetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -130,18 +295,18 @@ function Settings() {
       </header>
 
       <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6">
-        <h2 className="text-lg font-medium text-slate-900">系统状态</h2>
+        <h2 className="text-lg font-medium text-slate-900">初始设置</h2>
         <p className="mt-2 text-slate-600">
           {settings?.setup_completed
-            ? "已完成配置。"
-            : "尚未完成配置。完整设置向导将在后续阶段接入。"}
+            ? "已完成配置，可在此修改。"
+            : "尚未完成配置：填写 LLM 信息后任务才会开始。"}
         </p>
 
-        {settings && (
+        {settings?.setup_completed && (
           <dl className="mt-4 space-y-2 text-sm text-slate-600">
             <div className="flex gap-2">
               <dt className="w-28 shrink-0 text-slate-500">报告目录</dt>
-              <dd>{settings.report_directory ?? "未设置"}</dd>
+              <dd>{settings.report_directory ?? "未设置（使用默认数据目录）"}</dd>
             </div>
             <div className="flex gap-2">
               <dt className="w-28 shrink-0 text-slate-500">LLM Provider</dt>
@@ -151,19 +316,90 @@ function Settings() {
               <dt className="w-28 shrink-0 text-slate-500">LLM 模型</dt>
               <dd>{settings.llm_model ?? "未设置"}</dd>
             </div>
+            <div className="flex gap-2">
+              <dt className="w-28 shrink-0 text-slate-500">API Key</dt>
+              <dd>{settings.llm_api_key_configured ? "已配置" : "未配置"}</dd>
+            </div>
           </dl>
         )}
 
-        <div className="mt-6 flex items-center gap-3">
-          <button
-            type="button"
-            onClick={completeSetup}
-            disabled={saving || settings?.setup_completed}
-            className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800 disabled:opacity-50"
-          >
-            {saving ? "保存中…" : "标记为已配置"}
-          </button>
-          {message && <span className="text-sm text-slate-600">{message}</span>}
+        <div className="mt-6 space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <label className="block text-sm text-slate-700">
+              Provider
+              <select
+                value={form.llm_provider}
+                onChange={(e) => pickProvider(e.target.value)}
+                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              >
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI</option>
+                <option value="openai-compatible">OpenAI 兼容（自定义）</option>
+              </select>
+            </label>
+            <label className="block text-sm text-slate-700">
+              模型
+              <input
+                value={form.llm_model}
+                onChange={(e) => setForm({ ...form, llm_model: e.target.value })}
+                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+                placeholder="deepseek-chat"
+              />
+            </label>
+          </div>
+          <label className="block text-sm text-slate-700">
+            Base URL
+            <input
+              value={form.llm_base_url}
+              onChange={(e) => setForm({ ...form, llm_base_url: e.target.value })}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              placeholder="https://api.deepseek.com"
+            />
+          </label>
+          <label className="block text-sm text-slate-700">
+            API Key{" "}
+            {keyAlreadyOk ? (
+              <span className="text-xs text-emerald-600">已配置（留空保持不变）</span>
+            ) : (
+              <span className="text-xs text-amber-600">必填</span>
+            )}
+            <input
+              type="password"
+              value={form.llm_api_key}
+              onChange={(e) => setForm({ ...form, llm_api_key: e.target.value })}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              placeholder={
+                keyAlreadyOk ? "留空保持不变" : "粘贴 API Key（必填，存入系统凭据库）"
+              }
+            />
+          </label>
+          <label className="block text-sm text-slate-700">
+            报告目录（可选，留空使用默认数据目录）
+            <input
+              value={form.report_directory}
+              onChange={(e) => setForm({ ...form, report_directory: e.target.value })}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              placeholder="默认：数据目录下 reports"
+            />
+          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={saveSetup}
+              disabled={saving || !setupReady}
+              className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800 disabled:opacity-50"
+            >
+              {saving ? "保存中…" : "保存并完成设置"}
+            </button>
+            <button
+              type="button"
+              onClick={exportDiagnostics}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              导出诊断信息
+            </button>
+            {message && <span className="text-sm text-slate-600">{message}</span>}
+          </div>
         </div>
 
         {settings && (
@@ -226,7 +462,7 @@ function Models() {
     let cancelled = false;
     async function load() {
       try {
-        const r = await fetch("/api/models");
+        const r = await apiFetch("/api/models");
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         if (!cancelled) {
@@ -272,7 +508,7 @@ function Models() {
     if (!window.confirm(note)) return;
     setMessage(null);
     try {
-      const r = await fetch(`/api/models/${m.model_id}/install`, { method: "POST" });
+      const r = await apiFetch(`/api/models/${m.model_id}/install`, { method: "POST" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
     } catch (e) {
       setError(`安装失败：${e.message}`);
@@ -282,7 +518,7 @@ function Models() {
   async function cancel(m) {
     setMessage(null);
     try {
-      const r = await fetch(`/api/models/${m.model_id}/cancel`, { method: "POST" });
+      const r = await apiFetch(`/api/models/${m.model_id}/cancel`, { method: "POST" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
     } catch (e) {
       setError(`取消失败：${e.message}`);
@@ -295,7 +531,7 @@ function Models() {
     }
     setMessage(null);
     try {
-      const r = await fetch(`/api/models/${m.model_id}`, { method: "DELETE" });
+      const r = await apiFetch(`/api/models/${m.model_id}`, { method: "DELETE" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       if (data.pending_reclaim_bytes > 0) {
@@ -456,7 +692,7 @@ function Clients() {
     let cancelled = false;
     async function load() {
       try {
-        const r = await fetch("/api/mcp-clients");
+        const r = await apiFetch("/api/mcp-clients");
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         if (!cancelled) {
@@ -476,7 +712,7 @@ function Clients() {
 
   async function load() {
     try {
-      const r = await fetch("/api/mcp-clients");
+      const r = await apiFetch("/api/mcp-clients");
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       setClients(data.clients ?? []);
@@ -492,7 +728,7 @@ function Clients() {
     setBusyLabel(label);
     setMessage(null);
     try {
-      const r = await fetch(`/api/mcp-clients/${client.client_id}/${path}`, {
+      const r = await apiFetch(`/api/mcp-clients/${client.client_id}/${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body ?? {}),
@@ -530,7 +766,7 @@ function Clients() {
   async function restore(c) {
     let backups = [];
     try {
-      const r = await fetch(`/api/mcp-clients/${c.client_id}/backups`);
+      const r = await apiFetch(`/api/mcp-clients/${c.client_id}/backups`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       backups = (await r.json()).items ?? [];
     } catch (e) {
@@ -559,7 +795,7 @@ function Clients() {
       return;
     }
     try {
-      const r = await fetch(`/api/mcp-clients/${c.client_id}/config`);
+      const r = await apiFetch(`/api/mcp-clients/${c.client_id}/config`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       setCopyables((prev) => ({ ...prev, [c.client_id]: data }));
@@ -728,9 +964,81 @@ function Clients() {
   );
 }
 
-export function App() {
+
+function TokenGate({ onSubmit }) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    const token = value.trim();
+    if (!token) return;
+    try {
+      const r = await fetch("/api/jobs", { headers: { "X-Local-Token": token } });
+      if (r.status === 401) {
+        setError("令牌不正确，请重新粘贴。");
+        return;
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      onSubmit(token);
+    } catch {
+      setError("验证失败，请确认 EvoBlue Engine 正在运行。");
+    }
+  }
+
   return (
-    <Routes>
+    <section className="rounded-2xl border border-slate-200 bg-white p-6">
+      <h1 className="text-2xl font-semibold text-slate-950">请粘贴本机访问令牌</h1>
+      <p className="mt-2 text-sm text-slate-600">
+        本机访问令牌在数据目录的 local_token 文件中（数据目录可在下方「打开数据目录」指引中找到）。
+      </p>
+      <form onSubmit={submit} className="mt-4 flex items-start gap-3">
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="block w-full rounded-lg border border-slate-300 px-3 py-2 font-mono"
+          placeholder="粘贴 local_token 文件内容"
+        />
+        <button
+          type="submit"
+          className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800"
+        >
+          验证并进入
+        </button>
+      </form>
+      {error && <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+    </section>
+  );
+}
+
+export function App() {
+  const [needsToken, setNeedsToken] = useState(false);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  consumeTokenFragment();
+
+  useEffect(() => {
+    const onUnauthorized = () => setNeedsToken(true);
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, []);
+
+  if (needsToken) {
+    return (
+      <main className="mx-auto max-w-3xl px-6 py-16">
+        <TokenGate
+          onSubmit={(token) => {
+            saveLocalToken(token);
+            setNeedsToken(false);
+            setAuthEpoch((n) => n + 1);
+          }}
+        />
+      </main>
+    );
+  }
+
+  return (
+    <Routes key={authEpoch}>
       <Route path="/" element={<Home />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/models" element={<Models />} />

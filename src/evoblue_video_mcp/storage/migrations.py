@@ -364,6 +364,11 @@ async def init_db(engine: AsyncEngine, *, target_version: int | None = None) -> 
     Production callers must leave it unset. WAL mode is set per connection in
     ``build_engine`` (it cannot switch from inside a transaction).
     """
+    # P7 (INSTALLER_RELEASE_CONTRACT §6): snapshot before any version jump.
+    if target_version is None:
+        from evoblue_video_mcp.storage.backup import backup_before_upgrade
+
+        await backup_before_upgrade(engine, target_version=SCHEMA_VERSION)
     async with engine.begin() as conn:
         await conn.execute(
             text(

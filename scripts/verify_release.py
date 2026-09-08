@@ -129,6 +129,27 @@ def check(name, ok, detail=""):
         raise SystemExit(f"verification failed at: {name}")
 
 
+def _bridge_handshake(engine):
+    """MCP initialize+list_tools against the bundle exe's "bridge" subcommand."""
+    import asyncio
+
+    sys.path.insert(0, str(ROOT / "src"))
+    from evoblue_video_mcp.application.handshake import verify_bridge_handshake
+
+    env = dict(
+        os.environ,
+        EVOBLUE_ENGINE_PORT=str(engine.port),
+        EVOBLUE_DATA_DIRECTORY=str(engine.workdir / "data"),
+    )
+    exe = engine.exe
+
+    async def run():
+        return await verify_bridge_handshake(str(exe), ["bridge"], env)
+
+    result = asyncio.run(run())
+    return result.ok, (result.error or "initialize + list_tools")
+
+
 def verify(bundle, port, models_dir):
     from platformdirs import user_data_path
 
@@ -136,6 +157,14 @@ def verify(bundle, port, models_dir):
         real_models = models_dir
     else:
         real_models = user_data_path("EvoBlue Video MCP", "EvoBlue") / "models"
+    # The corrupt-model case needs a real provider installation to corrupt:
+    # a fabricated stub is (correctly) treated as not-installed by the model
+    # registry, so no load is attempted and the gate cannot be exercised.
+    # Skip explicitly instead of crashing where no models exist (CI, fresh
+    # machines); run with --models-dir on a real installation to enforce it.
+    if not Path(real_models).is_dir():
+        print("3. provider-failure isolation: SKIP (no models dir; pass --models-dir)")
+        real_models = None
 
     work = Path(tempfile.mkdtemp(prefix="evoblue-verify-"))
     try:
@@ -144,7 +173,17 @@ def verify(bundle, port, models_dir):
         engine.start()
         status, health = http_get(f"http://127.0.0.1:{port}/api/health")
         check("health endpoint", status == 200 and health.get("status") == "ok")
-        status, models = http_get(f"http://127.0.0.1:{port}/api/models")
+        # P7: a frozen exe boots production even without an explicit env, so
+        # the data endpoints are token-gated; read the persisted token.
+        fresh_token = (engine.workdir / "data" / "local_token")
+        check(
+            "token file created for frozen production boot",
+            fresh_token.is_file() and fresh_token.read_text(encoding="utf-8").strip(),
+        )
+        status, models = http_get(
+            f"http://127.0.0.1:{port}/api/models",
+            token=fresh_token.read_text(encoding="utf-8").strip(),
+        )
         items = models.get("items", []) if isinstance(models, dict) else []
         check("models list has 3 built-ins", status == 200 and len(items) == 3)
         by_id = {item["model_id"]: item for item in items}
@@ -167,28 +206,36 @@ def verify(bundle, port, models_dir):
         check("data endpoint accepts valid token", status == 200)
         engine2.stop()
 
-        print("3. provider-failure isolation")
-        corrupt_root = work / "corrupt-models"
-        corrupt_root.mkdir(parents=True)
-        copytree_ignore = shutil.ignore_patterns("*.tar.bz2", "*.wav", ".trash", ".downloads")
-        shutil.copytree(real_models, corrupt_root / "models", ignore=copytree_ignore)
-        bad_model = (
-            corrupt_root
-            / "models"
-            / "sensevoice-small-int8"
-            / "2024-07-17"
-            / "model.int8.onnx"
-        )
-        bad_model.write_bytes(b"corrupt")
-        engine3 = Engine(bundle, port, work / "isolated")
-        engine3.start(models_dir=corrupt_root / "models")
-        status, _health = http_get(f"http://127.0.0.1:{port}/api/health")
-        check("engine stays healthy with a corrupt model", status == 200)
-        check(
-            "load failure logged with stable error code",
-            engine3.log_contains("ASR_PROVIDER_LOAD_FAILED"),
-        )
-        engine3.stop()
+        if real_models is not None:
+            print("3. provider-failure isolation")
+            corrupt_root = work / "corrupt-models"
+            corrupt_root.mkdir(parents=True)
+            copytree_ignore = shutil.ignore_patterns("*.tar.bz2", "*.wav", ".trash", ".downloads")
+            shutil.copytree(real_models, corrupt_root / "models", ignore=copytree_ignore)
+            bad_model = (
+                corrupt_root
+                / "models"
+                / "sensevoice-small-int8"
+                / "2024-07-17"
+                / "model.int8.onnx"
+            )
+            bad_model.write_bytes(b"corrupt")
+            engine3 = Engine(bundle, port, work / "isolated")
+            engine3.start(models_dir=corrupt_root / "models", production=True)
+            status, _health = http_get(f"http://127.0.0.1:{port}/api/health")
+            check("engine stays healthy with a corrupt model", status == 200)
+            check(
+                "load failure logged with stable error code",
+                engine3.log_contains("ASR_PROVIDER_LOAD_FAILED"),
+            )
+            engine3.stop()
+
+        print("4. frozen bridge subcommand handshake")
+        engine4 = Engine(bundle, port, work / "bridge")
+        engine4.start(production=True)
+        bridge_ok, bridge_detail = _bridge_handshake(engine4)
+        check("bridge handshake ok", bridge_ok, detail=bridge_detail)
+        engine4.stop()
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

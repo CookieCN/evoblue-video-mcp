@@ -89,3 +89,9 @@ Wilson 决策（2026-09-06）：Engine 离线时 P4 只报 `ENGINE_NOT_READY` + 
   不是缺陷；未来要真过滤，正确做法是 Engine 给 `/api/jobs` 暴露 `url` 并派生 platform。
 - 错误翻译矩阵（HTTP 状态/连接错误 → 稳定码）集中在 `mcp/errors.py`，新增 Engine
   错误面时只改一处。
+
+## Amendment (2026-09-07, P8)
+
+- `diagnose_environment` 的检查名冻结枚举按只增不改原则追加 `worker_runtime`
+  （Worker 认领门禁镜像：setup_incomplete / llm_key_unavailable / keyring_error
+  / ready）。枚举追加对客户端向后兼容；穷举检查名的消费方需同步。

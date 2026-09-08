@@ -160,6 +160,128 @@ describe("App", () => {
     expect(screen.getByText("queued")).toBeInTheDocument();
   });
 
+  it("warns when jobs are queued but first setup is incomplete", async () => {
+    mockFetchRouter({
+      "/api/jobs": { data: { items: [{ job_id: "job-9", status: "queued" }] } },
+      "/api/settings": { data: { setup_completed: false } },
+    });
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/任务在排队但不会开始/)).toBeInTheDocument();
+  });
+
+  it("does not warn when setup is already completed", async () => {
+    mockFetchRouter({
+      "/api/jobs": { data: { items: [{ job_id: "job-9", status: "queued" }] } },
+      "/api/settings": { data: { setup_completed: true } },
+    });
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("job-9");
+    expect(screen.queryByText(/任务在排队但不会开始/)).not.toBeInTheDocument();
+  });
+
+  it("completing setup submits the full runnable LLM configuration", async () => {
+    const calls = mockFetchRouter({
+      "/api/settings": { data: { setup_completed: false } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/尚未完成配置/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(/粘贴 API Key/), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存并完成设置" }));
+
+    await waitFor(() => {
+      const put = calls.find(
+        (c) => c.url.includes("/api/settings") && c.init.method === "PUT",
+      );
+      expect(put).toBeDefined();
+      const body = JSON.parse(put.init.body);
+      // the worker gate needs all four: provider/base URL/model/key
+      expect(body.llm_provider).toBe("deepseek");
+      expect(body.llm_base_url).toBe("https://api.deepseek.com");
+      expect(body.llm_model).toBe("deepseek-chat");
+      expect(body.llm_api_key).toBe("sk-test");
+      expect(body.setup_completed).toBe(true);
+    });
+  });
+
+  it("refuses to complete setup on a fresh install until the API key is typed", async () => {
+    mockFetchRouter({ "/api/settings": { data: { setup_completed: false } } });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/尚未完成配置/);
+
+    const save = screen.getByRole("button", { name: "保存并完成设置" });
+    // the provider/base/model defaults are prefilled — the KEY is the gate
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/粘贴 API Key/), {
+      target: { value: "sk-test" },
+    });
+    expect(save).not.toBeDisabled();
+    // clearing any other required field disables again
+    fireEvent.change(screen.getByPlaceholderText("deepseek-chat"), {
+      target: { value: "" },
+    });
+    expect(save).toBeDisabled();
+  });
+
+  it("allows leaving the key empty only when the provider is unchanged and configured", async () => {
+    mockFetchRouter({
+      "/api/settings": {
+        data: {
+          setup_completed: true,
+          llm_provider: "deepseek",
+          llm_base_url: "https://api.deepseek.com",
+          llm_model: "deepseek-chat",
+          llm_api_key_configured: true,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/已完成配置/);
+
+    const save = screen.getByRole("button", { name: "保存并完成设置" });
+    expect(save).not.toBeDisabled();
+
+    // switching provider invalidates the stored key -> key required again
+    // (two "Provider" labels exist: the setup form and the ASR routing block;
+    // the form comes first in the DOM)
+    const providerSelect = screen.getAllByLabelText("Provider")[0];
+    fireEvent.change(providerSelect, { target: { value: "openai" } });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/必填，存入系统凭据库/), {
+      target: { value: "sk-new" },
+    });
+    expect(save).not.toBeDisabled();
+  });
+
   it("shows an error message when fetching jobs fails", async () => {
     mockFetch({ ok: false, status: 500, data: {} });
 
@@ -321,5 +443,86 @@ describe("MCP clients page", () => {
     await screen.findByText("真实握手失败（name_mismatch）。");
     const workbuddy = cardOf("WorkBuddy");
     expect(within(workbuddy).getByText(/验证失败（timeout）/)).toBeInTheDocument();
+  });
+});
+
+describe("token bootstrap (P7)", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    window.location.hash = "";
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(status, data) {
+    return { ok: status < 400, status, json: async () => data };
+  }
+
+  function headersOf(init) {
+    const h = init?.headers;
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    return Object.fromEntries(Object.entries(h ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+  }
+
+  it("stores the token from the URL fragment, strips it, and sends the header", async () => {
+    const calls = mockFetchRouter({ "/api/jobs": { data: { items: [] } } });
+    window.location.hash = "#evoblue_token=frag-token";
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "EvoBlue Video MCP" });
+    await waitFor(() => {
+      expect(localStorage.getItem("evoblue.local_token")).toBe("frag-token");
+    });
+    expect(window.location.hash).toBe("");
+    const jobsCalls = calls.filter((c) => c.url.includes("/api/jobs"));
+    expect(jobsCalls.length).toBeGreaterThan(0);
+    expect(headersOf(jobsCalls[0].init)["x-local-token"]).toBe("frag-token");
+  });
+
+  it("renders the paste gate on 401 and enters after a valid token", async () => {
+    mockFetchRouter({
+      "/api/jobs": { data: { items: [{ job_id: "job-1", status: "queued" }] } },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input, init) => {
+        const url = String(input);
+        const headers = headersOf(init);
+        if (headers["x-local-token"] === "good-token") {
+          return Promise.resolve(
+            jsonResponse(200, { items: [{ job_id: "job-1", status: "running" }] }),
+          );
+        }
+        if (url.includes("/api/")) {
+          return Promise.resolve(jsonResponse(401, {}));
+        }
+        return Promise.resolve(jsonResponse(200, {}));
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("请粘贴本机访问令牌")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("粘贴 local_token 文件内容"), {
+      target: { value: "good-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "验证并进入" }));
+
+    expect(await screen.findByRole("heading", { name: "EvoBlue Video MCP" })).toBeInTheDocument();
+    expect(localStorage.getItem("evoblue.local_token")).toBe("good-token");
+    expect(await screen.findByText("job-1")).toBeInTheDocument();
   });
 });

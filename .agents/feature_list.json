@@ -164,7 +164,7 @@
     },
     "delivery_roadmap": {
       "name": "Post-P0 delivery phases",
-      "status": "in_progress",
+      "status": "done",
       "features": [
         {
           "id": "P1",
@@ -199,12 +199,12 @@
         {
           "id": "P7",
           "name": "Windows installer and GitHub Release",
-          "status": "planned"
+          "status": "done"
         },
         {
           "id": "P8",
           "name": "Public testing and Harness hardening",
-          "status": "planned"
+          "status": "done"
         }
       ]
     },
@@ -281,12 +281,96 @@
           "status": "done"
         }
       ]
+    },
+    "p7_installer_release": {
+      "name": "P7 Windows installer, single instance, and GitHub Release",
+      "status": "done",
+      "contract": "docs/INSTALLER_RELEASE_CONTRACT.md + docs/adr/0006-installer-and-release.md",
+      "features": [
+        {
+          "id": "P7-001",
+          "name": "Contract freeze + version-consistency gate (0.9.0b1)",
+          "status": "done"
+        },
+        {
+          "id": "P7-002",
+          "name": "Packaged WebUI production: frozen=production, token fragment bootstrap, SPA catch-all, TokenGate",
+          "status": "done"
+        },
+        {
+          "id": "P7-003",
+          "name": "Single instance: mutex + engine.lock + port probe, exit codes 3/4 with frozen messages",
+          "status": "done"
+        },
+        {
+          "id": "P7-004",
+          "name": "Packaged bridge entry: engine exe 'bridge' subcommand + frozen client-config payload",
+          "status": "done"
+        },
+        {
+          "id": "P7-005",
+          "name": "Pre-migration backup via SQLite backup API (evoblue.db.bak-v<from>, fail-open)",
+          "status": "done"
+        },
+        {
+          "id": "P7-006",
+          "name": "Inno Setup per-user installer + portable zip + SHA256SUMS; real-machine acceptance 16/16",
+          "status": "done"
+        },
+        {
+          "id": "P7-007",
+          "name": "release.yml: tag->matrix build->verifications->draft release (owner publishes)",
+          "status": "done"
+        },
+        {
+          "id": "P7-008",
+          "name": "verify_release bridge step + verify_p7_acceptance + install/release docs",
+          "status": "done"
+        }
+      ]
+    },
+    "p8_public_hardening": {
+      "name": "P8 Public testing and Harness hardening",
+      "status": "done",
+      "contract": "docs/HARDENING_MATRIX.md",
+      "features": [
+        {
+          "id": "P8-001",
+          "name": "Hardening matrix: failure modes pinned to guard tests, user-visible behaviour, recovery",
+          "status": "done"
+        },
+        {
+          "id": "P8-002",
+          "name": "Worker idle reason visibility: Home banner + diagnostics worker_runtime check (append-only enum)",
+          "status": "done"
+        },
+        {
+          "id": "P8-003",
+          "name": "Redacted diagnostics export endpoint + WebUI button",
+          "status": "done"
+        },
+        {
+          "id": "P8-004",
+          "name": "Fault-injection regressions: port occupied exit 4, double-instance exit 3, report-write failure sanitized",
+          "status": "done"
+        },
+        {
+          "id": "P8-005",
+          "name": "docs/SUPPORT.md symptom->cause->fix table (SmartScreen/AV, token, ports, China network, FFmpeg)",
+          "status": "done"
+        },
+        {
+          "id": "P8-006",
+          "name": "CI closeout: drift gates wired, audit record in RELEASE_VERIFICATION, harness closeout",
+          "status": "done"
+        }
+      ]
     }
   },
   "summary": {
-    "done": 45,
+    "done": 61,
     "in_progress": 0,
-    "planned": 2,
-    "completion_pct": 95.7
+    "planned": 0,
+    "completion_pct": 100.0
   }
 }

@@ -113,3 +113,51 @@ async def test_diagnostics_completes_within_local_budget(
     assert response.status_code == 200
     # Frozen §0.3 budgets: 15 s local, 30 s with network — CI headroom kept.
     assert elapsed < (28.0 if include_network else 13.0)
+
+
+async def test_diagnostics_export_is_redacted_attachment(
+    session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """P8-003: the export bundle carries no absolute paths or credential refs."""
+    import json as _json
+
+    secret_dir = str(tmp_path / "reports" / "deep")
+    secret_cli = str(tmp_path / "tools" / "whisper-cli.exe")
+    async with session_factory() as sess:
+        await save_app_settings(
+            sess,
+            setup_completed=True,
+            report_directory=secret_dir,
+            llm_provider="deepseek",
+            llm_base_url="https://api.deepseek.com/v1",
+            llm_model="deepseek-chat",
+            llm_credential_ref="llm:deepseek",
+            asr_provider="auto",
+            whisper_cpp_executable=secret_cli,
+            now=_NOW,
+        )
+
+    app = create_app(session_factory=session_factory, local_token=_TOKEN)
+    headers = {"X-Local-Token": _TOKEN}
+    async with _client(app) as client:
+        denied = await client.get("/api/diagnostics/export")
+        assert denied.status_code == 401
+        r = await client.get("/api/diagnostics/export", headers=headers)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.headers["content-disposition"].startswith("attachment;")
+    assert "evoblue-diagnostics-" in r.headers["content-disposition"]
+
+    payload = _json.loads(r.text)
+    assert payload["kind"] == "evoblue-diagnostics"
+    assert payload["redacted"] is True
+    assert payload["app_version"] == __version__
+    assert [c["name"] for c in payload["checks"]] == list(CHECK_NAMES)
+    settings_view = payload["settings"]
+    assert settings_view["report_directory"] is not None
+    assert secret_dir not in r.text, "absolute report path must be redacted"
+    assert "whisper-cli" not in r.text, "CLI path must never appear"
+    assert settings_view["whisper_cli_configured"] is True
+    assert "llm:deepseek" not in r.text, "credential reference must be omitted"
+    assert settings_view["llm_base_url_host"] == "api.deepseek.com"
+    assert "index" in payload and "open_issues" in payload["index"]

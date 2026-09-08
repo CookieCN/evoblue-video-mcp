@@ -220,3 +220,47 @@ async def test_asr_runtime_reflects_provider_registry(
         assert "fake-asr" in check.message
     finally:
         registry.clear()
+
+
+async def test_worker_runtime_mirrors_the_claim_gate(
+    make_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """P8-002: the check reports exactly why queued jobs would not start."""
+    # 1) setup incomplete
+    report = await _collect(make_factory)
+    named = _by_name(report)
+    assert named["worker_runtime"].detail == "setup_incomplete"
+    assert named["worker_runtime"].status == "warning"
+
+    # 2) fully-configured + key present -> ready
+    async with make_factory() as session:
+        await save_app_settings(
+            session,
+            setup_completed=True,
+            llm_provider="deepseek",
+            llm_base_url="https://api.deepseek.com",
+            llm_model="deepseek-chat",
+            llm_credential_ref="llm:deepseek",
+            now=_NOW,
+        )
+    report = await _collect(
+        make_factory, credential_store=FakeCredentialStore("sk-test")
+    )
+    named = _by_name(report)
+    assert named["worker_runtime"].status == "pass"
+    assert named["worker_runtime"].detail == "ready"
+
+    # 3) credential ref present but keyring holds nothing -> not claimable
+    report = await _collect(make_factory, credential_store=FakeCredentialStore(None))
+    named = _by_name(report)
+    assert named["worker_runtime"].detail == "llm_key_unavailable"
+
+    # 4) keyring raises -> keyring_error (message never leaks the exception)
+    class BoomStore(FakeCredentialStore):
+        def get_secret(self, reference: str) -> str | None:
+            raise RuntimeError("keyring exploded")
+
+    report = await _collect(make_factory, credential_store=BoomStore("x"))
+    named = _by_name(report)
+    assert named["worker_runtime"].detail == "keyring_error"
+    assert "keyring exploded" not in (named["worker_runtime"].message or "")

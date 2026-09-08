@@ -50,6 +50,9 @@ CHECK_NAMES: tuple[str, ...] = (
     "gpu",
     "asr_models",
     "cookie_browser",
+    # P8-002 (append-only): why queued jobs are not being claimed - the same
+    # gate ProductionHandlerFactory applies before a worker can pick up work.
+    "worker_runtime",
 )
 
 _CHECK_TIMEOUT_S = 4.0
@@ -291,6 +294,58 @@ async def collect_diagnostics(
             message=f"LLM 已配置 ({row.llm_provider} / {row.llm_model}, API Key 已配置)",
         )
 
+    async def check_worker_runtime() -> DiagnosticOutcome:
+        """Mirror the worker's claim gate: why would queued jobs not start?
+
+        Derives from the same inputs ProductionHandlerFactory reads (settings
+        row + credential store) - it never introspects the live worker task.
+        """
+        async with session_factory() as sess:
+            row = await get_app_settings(sess)
+        if row is None or not row.setup_completed:
+            return DiagnosticOutcome(
+                name="worker_runtime",
+                status="warning",
+                message="Worker 空闲: 初始设置未完成, 已提交任务不会开始",
+                detail="setup_incomplete",
+            )
+        if not (
+            row.llm_provider
+            and row.llm_base_url
+            and row.llm_model
+            and row.llm_credential_ref
+        ):
+            return DiagnosticOutcome(
+                name="worker_runtime",
+                status="warning",
+                message="Worker 空闲: LLM 配置不完整, 已提交任务不会开始",
+                detail="llm_key_unavailable",
+            )
+        if credential_store is not None:
+            try:
+                configured = bool(
+                    await asyncio.to_thread(
+                        credential_store.get_secret, row.llm_credential_ref
+                    )
+                )
+            except Exception:
+                return DiagnosticOutcome(
+                    name="worker_runtime",
+                    status="warning",
+                    message="Worker 空闲: 系统凭据库不可用, 已提交任务不会开始",
+                    detail="keyring_error",
+                )
+            if not configured:
+                return DiagnosticOutcome(
+                    name="worker_runtime",
+                    status="warning",
+                    message="Worker 空闲: API Key 未配置, 已提交任务不会开始",
+                    detail="llm_key_unavailable",
+                )
+        return DiagnosticOutcome(
+            name="worker_runtime", status="pass", message="Worker 就绪", detail="ready"
+        )
+
     async def check_llm_api() -> DiagnosticOutcome:
         if not include_network:
             return DiagnosticOutcome(
@@ -397,6 +452,7 @@ async def collect_diagnostics(
         _guarded("gpu", check_gpu),
         _guarded("asr_models", check_asr_models),
         _guarded("cookie_browser", check_cookie_browser),
+        _guarded("worker_runtime", check_worker_runtime),
     )
     by_name = {outcome.name: outcome for outcome in outcomes}
     ordered = tuple(by_name[name] for name in CHECK_NAMES)

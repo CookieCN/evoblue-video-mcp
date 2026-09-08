@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evoblue-video-mcp"
-version = "0.1.0"
+version = "0.9.0b1"
 description = "Local-first video understanding and Markdown knowledge management"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -83,11 +83,19 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # Same for the P5 write-contract drift + structural gates.
 "tests/contract/test_client_write_contract.py" = ["RUF001"]
 "tests/contract/test_client_write_guards.py" = ["RUF001"]
+# Same for the P7 installer/release drift gate: headings must byte-match the
+# contract doc's section titles (fullwidth punctuation included).
+"tests/contract/test_installer_release_contract.py" = ["RUF001"]
 # The client registry strings must byte-match the contract doc's §1 table
 # (fullwidth punctuation included) — that is the drift lock working.
 "src/evoblue_video_mcp/application/client_config/specs.py" = ["RUF001"]
 # User-facing Chinese copy correctly uses fullwidth punctuation.
 "src/evoblue_video_mcp/application/client_config/service.py" = ["RUF001"]
+# Same: settings API error messages are user-facing Chinese copy.
+"src/evoblue_video_mcp/web/app.py" = ["RUF001"]
+# Same: the engine's startup conflict messages are frozen Chinese copy
+# (INSTALLER_RELEASE_CONTRACT §3).
+"src/evoblue_video_mcp/runtime/singleton.py" = ["RUF001"]
 "src/evoblue_video_mcp/application/client_config/adapters/file_auto.py" = ["RUF001"]
 "src/evoblue_video_mcp/application/client_config/adapters/claude_code.py" = ["RUF001"]
 "src/evoblue_video_mcp/application/client_config/adapters/deepseek.py" = ["RUF001"]

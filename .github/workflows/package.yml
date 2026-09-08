@@ -1,6 +1,7 @@
-# Packaging matrix (ASR-4): build the PyInstaller onedir bundles on every push.
-# Artifacts are uploaded for inspection; nothing is published or released
-# (publishing is P7 and stays a manual, owner-gated action).
+# Packaging matrix (ASR-4): build the PyInstaller onedir bundles on every push
+# as a build-health gate. Tagged releases go through release.yml, which adds
+# the installer, release verification, and a draft GitHub Release (publishing
+# remains a manual, owner-gated action).
 
 name: package
 

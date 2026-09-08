@@ -166,6 +166,7 @@ CheckName = Literal[
     "gpu",
     "asr_models",
     "cookie_browser",
+    "worker_runtime",
 ]
 """Frozen diagnostics check names; order here matches MCP_TOOLS.md §7."""
 
@@ -183,6 +184,7 @@ CHECK_NAMES: tuple[str, ...] = (
     "gpu",
     "asr_models",
     "cookie_browser",
+    "worker_runtime",
 )
 
 

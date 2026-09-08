@@ -16,6 +16,19 @@
 | Storage | database path、temp policy、limits | 平台标准目录；空间预检 |
 | Privacy/logging | telemetry off、retention、log level | 默认最小采集，诊断包需确认 |
 
+## 本机访问令牌（P7）
+
+打包形态（frozen ⇒ production，`INSTALLER_RELEASE_CONTRACT` §4）：
+
+- 首次启动在数据目录生成 `local_token`（随机），全部 `/api/*` 数据端点要求
+  `X-Local-Token` 头（`/api/health` 豁免）；
+- Engine 启动后自动打开浏览器到 `/#evoblue_token=<token>`（fragment 不进
+  uvicorn 访问日志；`EVOBLUE_OPEN_UI=0` 关闭）；WebUI 把 token 存入浏览器
+  localStorage（按 OS 用户隔离）后立即从地址栏抹除；
+- 浏览器丢失 token（清存储/换浏览器）时，WebUI 显示粘贴门页——打开数据目录
+  的 `local_token` 文件复制即可；
+- Bridge/客户端不读该配置：token 经数据目录文件自动发现（ADR 0004）。
+
 ## 默认值
 
 - Engine：`127.0.0.1:8765`。

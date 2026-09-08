@@ -47,3 +47,46 @@ token 文件生成与 401/200 行为、损坏模型下 Engine 存活 + 稳定错
 
 - [ ] 将本机实测体积、RTF、内存数字回填至发布说明（GitHub Release body 草稿）
 - [ ] 附上 `benchmarks/results/` 对应报告
+
+## 7. 安装器与 Release（P7）
+
+自动化（每次构建机）：
+
+```bash
+uv run python scripts/build_installer.py          # setup.exe + zip + SHA256SUMS
+uv run python scripts/verify_release.py dist/evoblue-video-mcp-full   # 步骤 3 需 --models-dir（真实模型安装）
+uv run python scripts/verify_p7_acceptance.py     # 真机安装/升级/卸载全链
+```
+
+- [ ] `verify_release.py` 全过（本机无真实模型时步骤 3 SKIP；发布机必须带 `--models-dir` 强制执行）
+- [ ] `verify_p7_acceptance.py` 16 项全过（安装/token 门禁/双开退出码 3/bridge 握手/重装/卸载保数据）
+- [ ] tag == pyproject 版本（release workflow 首个 job 强制）
+- [ ] 草稿 Release 附全部产物 + `SHA256SUMS.txt`，Owner 回填体积/RTF 数字后手动发布
+
+## 8. Release 前人工清单（继承 §3-§5）
+
+- [ ] 最低规格目标机（4 核 / 8 GB）干净安装：setup.exe 双击、自启动生效、WebUI 首次设置可完成
+- [ ] 中国大陆网络 profile：Lite 模型下载可续传、校验失败转 failed 不半激活（§4 原清单）
+- [ ] 升级演练：旧数据目录 + 新安装器 → 迁移成功、出现 `evoblue.db.bak-v<旧版本>`
+- [ ] 按 `docs/MIGRATION_ROLLBACK.md` 做一次备份恢复演练
+- [ ] 未签名程序的 SmartScreen/杀软放行指引已在 Release notes 与 SUPPORT 引用
+- [ ] **杀软实测留证（2026-09-07）**：Windows Defender 云判定把新构建的未签名
+      `evoblue-engine-full.exe` 隔离（验收临时目录内 WinError 225）。构建机验收前
+      需以管理员加排除：`Add-MpPreference -ExclusionPath '<repo>\dist'`；正式发布
+      的安装包哈希不同，用户机器是否被拦需以 Release 后真实反馈为准（处置文案见
+      `docs/SUPPORT.md`）
+
+
+## 9. 审计留档（P8-006）
+
+后果性动作与既有脱敏结构化留档的对应关系：
+
+| 动作 | 留档位置 | 脱敏口径 |
+|---|---|---|
+| 提交/取消任务、状态转换 | SQLite `jobs`（状态机 + error_code） | error_detail 脱敏（异常类型/稳定码） |
+| 报告索引写入/重建 | SQLite `report_documents` + `index_issues` | 路径以数据库记录为准，诊断只出尾部 |
+| 模型安装/卸载/下载 | SQLite `model_*` 三表 + 服务日志 | 路径尾部；下载源 host |
+| MCP 客户端配置写入/恢复 | 备份文件 + 服务日志（provider_id + 稳定码 + 异常类型） | 不含凭据，不回显文件内容 |
+| 设置保存（含报告目录双写） | SQLite `app_settings` + 指针文件 | 目录不进日志 |
+| Engine 启动冲突 | stderr 退出码 3/4 + 中文文案（一次性，不落盘） | 只含端口，不含路径 |
+| 诊断/导出 | `collect_diagnostics` 统一脱敏（redacted=true） | 路径尾部两段；Key/Cookie 只报已配置/未配置 |

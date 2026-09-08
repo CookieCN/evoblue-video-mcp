@@ -47,6 +47,9 @@ tier 语义：`file_auto` = 结构化合并 + 备份 + 回读验证 + 真实握�
 
 - `command` = Engine 进程自身的解释器（生产环境 `sys.executable`）；`args` 固定为
   `["-m", "evoblue_video_mcp.mcp"]`（CLIENT_COMPATIBILITY「Bridge 启动合同」）。
+- 打包形态分支（P7，INSTALLER_RELEASE_CONTRACT §5）：frozen（PyInstaller）进程
+  的载荷为 `command = <引擎exe路径>`、`args = ["bridge"]`（引擎 exe 的 `bridge`
+  子命令）；两形态按 `sys.frozen` 互斥，env 策略与 token 禁写规则不变。
 - 受管字段（managed keys）= `command` / `args` / `env`。合并与冲突判定只看这三个键。
 - env 策略：仅当 Engine 端口 ≠ 8765 时写入 `EVOBLUE_ENGINE_PORT=<port>`；**永不把
   token 写入任何客户端配置文件**（Bridge 经数据目录 `local_token` 文件自动发现，

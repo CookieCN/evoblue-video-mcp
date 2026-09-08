@@ -2,10 +2,13 @@
 
 import asyncio
 import logging
+import platform
 import secrets
 import time
+import urllib.parse
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -26,7 +29,7 @@ from evoblue_video_mcp.application.client_config.service import (
     ClientStatus,
     OperationResult,
 )
-from evoblue_video_mcp.application.diagnostics import collect_diagnostics
+from evoblue_video_mcp.application.diagnostics import collect_diagnostics, redact_path
 from evoblue_video_mcp.application.submit import compute_config_fingerprint, submit_video
 from evoblue_video_mcp.asr.service import ModelManagerService, ModelSummary
 from evoblue_video_mcp.config import CredentialStore, Settings, llm_credential_reference
@@ -368,6 +371,75 @@ def _register_diagnostics_endpoint(
             redacted=True,
         )
 
+    @app.get("/api/diagnostics/export", dependencies=dependencies)
+    async def diagnostics_export() -> JSONResponse:
+        """Redacted diagnostics bundle for bug reports (P8-003).
+
+        Contract: errors answer in the frozen JSON envelope (the path sits
+        under the /api/diagnostics prefix); success is a JSON attachment. The
+        payload reuses the redacted diagnostics report and adds only
+        non-secret context - paths appear as redacted tails, the whisper CLI
+        surfaces as a boolean, and no credential reference is included.
+        """
+        import sys as _sys
+        from datetime import date, datetime
+
+        report = await collect_diagnostics(
+            session_factory,
+            credential_store=credential_store,
+            model_service=model_service,
+            fallback_report_root=fallback_report_root,
+            pointer_file=pointer_file,
+            data_directory=data_directory,
+            include_network=False,
+            http_get=_llm_status_probe(),
+        )
+        async with session_factory() as sess:
+            row = await get_app_settings(sess)
+            open_issues = await count_open_issues(sess)
+        base_host = None
+        if row is not None and row.llm_base_url:
+            base_host = urllib.parse.urlsplit(row.llm_base_url).hostname
+        payload = {
+            "kind": "evoblue-diagnostics",
+            "exported_at": datetime.now(UTC).isoformat(),
+            "app_version": __version__,
+            "platform": _sys.platform,
+            "python_version": platform.python_version(),
+            "overall": report.overall,
+            "checks": [
+                {
+                    "name": check.name,
+                    "status": check.status,
+                    "message": check.message,
+                    "detail": check.detail,
+                }
+                for check in report.checks
+            ],
+            "settings": {
+                "setup_completed": bool(row.setup_completed) if row else False,
+                "llm_provider": row.llm_provider if row else None,
+                "llm_model": row.llm_model if row else None,
+                "llm_base_url_host": base_host,
+                "asr_provider": row.asr_provider if row else "auto",
+                "report_directory": (
+                    redact_path(Path(row.report_directory))
+                    if row is not None and row.report_directory
+                    else None
+                ),
+                "whisper_cli_configured": (
+                    bool(row.whisper_cpp_executable) if row else False
+                ),
+            },
+            "index": {"open_issues": open_issues},
+            "redacted": True,
+        }
+        filename = f"evoblue-diagnostics-{__version__}-{date.today().isoformat()}.json"
+        return JSONResponse(
+            content=payload,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
 
 def _register_data_endpoints(
     app: FastAPI,
@@ -461,6 +533,77 @@ def _register_data_endpoints(
             credential_ref = current.llm_credential_ref if current else None
             if "llm_provider" in fields and provider != (current.llm_provider if current else None):
                 credential_ref = llm_credential_reference(provider or "")
+            if "llm_api_key" in fields and payload.llm_api_key:
+                credential_ref = llm_credential_reference(provider or "")
+
+            # Runnable-setup invariant (P1 review rounds 2-3): the FINAL state
+            # after this save must pass the same gate
+            # ProductionHandlerFactory applies before a worker claims jobs —
+            # provider, base URL, model, credential ref all present AND the
+            # keyring actually holds the key for the final ref (the payload's
+            # own key counts). The gate runs whenever the final state is
+            # completed, NOT only when the payload explicitly carries
+            # setup_completed=true: otherwise a partial update (delete key,
+            # switch provider, clear model) on an already-completed record
+            # would silently preserve the true flag and re-create the
+            # "configured but worker idle" deadlock. An explicit
+            # setup_completed=false downgrades and skips the gate by design.
+            # Checked here, before ANY side effect (keyring write, pointer
+            # write, database commit): the frontend can be bypassed or simply
+            # wrong, so this is the authority.
+            final_setup_completed = (
+                payload.setup_completed
+                if payload.setup_completed is not None
+                else (current.setup_completed if current else False)
+            )
+            if final_setup_completed:
+                merged_base_url = (
+                    payload.llm_base_url
+                    if "llm_base_url" in fields
+                    else (current.llm_base_url if current else None)
+                )
+                merged_model = (
+                    payload.llm_model
+                    if "llm_model" in fields
+                    else (current.llm_model if current else None)
+                )
+                key_in_payload = "llm_api_key" in fields and bool(
+                    payload.llm_api_key and payload.llm_api_key.get_secret_value()
+                )
+                # an explicit empty llm_api_key DELETES the stored secret later
+                # in this handler — the stored key must not count as configured
+                key_deleted = "llm_api_key" in fields and not key_in_payload
+                key_stored = False
+                if (
+                    not key_in_payload
+                    and not key_deleted
+                    and credential_store is not None
+                    and credential_ref
+                ):
+                    try:
+                        key_stored = bool(
+                            await asyncio.to_thread(
+                                credential_store.get_secret, credential_ref
+                            )
+                        )
+                    except Exception:
+                        key_stored = False
+                if not (
+                    provider
+                    and merged_base_url
+                    and merged_model
+                    and credential_ref
+                    and (key_in_payload or key_stored)
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "无法完成设置：LLM 配置不可运行"
+                            "（Provider / Base URL / 模型 / API Key 必须齐全，"
+                            "API Key 需已存入凭据库；切换 Provider 后必须填写新 Key）"
+                        ),
+                    )
+
             if "llm_api_key" in fields:
                 if credential_store is None:
                     raise HTTPException(status_code=503, detail="credential store unavailable")

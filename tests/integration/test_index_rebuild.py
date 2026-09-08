@@ -37,6 +37,22 @@ from evoblue_video_mcp.storage.report_repository import (
 )
 from evoblue_video_mcp.storage.repository import save_app_settings
 
+# P7 review (runnable-setup invariant): settings PUTs on a COMPLETED record
+# must pass the same runnable gate as the worker claim. These five pointer-
+# compensation tests seed a completed record and drive the endpoint, so they
+# seed a runnable LLM config and hand the app a working credential store.
+_RUNNABLE_LLM_KWARGS = {
+    "llm_provider": "deepseek",
+    "llm_base_url": "https://api.deepseek.com",
+    "llm_model": "deepseek-chat",
+    "llm_credential_ref": "llm:deepseek",
+}
+
+
+class _RunnableCredentials:
+    def get_secret(self, reference: str) -> str | None:
+        return "sk-test" if reference == "llm:deepseek" else None
+
 
 def _markdown(*, job_id: str, title: str, summary: str) -> str:
     doc = ReportDocument(
@@ -953,7 +969,11 @@ async def test_settings_put_pointer_failure_keeps_database_and_pointer_consisten
     dir_b.mkdir()
     async with session_factory() as sess:
         await save_app_settings(
-            sess, setup_completed=True, now=1000.0, report_directory=str(dir_a)
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
         )
     write_report_pointer(data_dir, dir_a)
 
@@ -966,6 +986,7 @@ async def test_settings_put_pointer_failure_keeps_database_and_pointer_consisten
         session_factory=session_factory,
         index_rebuild_service=service,
         report_pointer_file=pointer_file,
+        credential_store=_RunnableCredentials(),
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://t"
@@ -1226,10 +1247,18 @@ async def test_concurrent_settings_puts_serialize_to_consistent_state(
         directory.mkdir()
     async with session_factory() as sess:
         await save_app_settings(
-            sess, setup_completed=True, now=1000.0, report_directory=str(dir_a)
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
         )
     write_report_pointer(data_dir, dir_a)
-    app = create_app(session_factory=session_factory, report_pointer_file=pointer_file)
+    app = create_app(
+        session_factory=session_factory,
+        report_pointer_file=pointer_file,
+        credential_store=_RunnableCredentials(),
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://t"
     ) as client:
@@ -1271,7 +1300,11 @@ async def test_settings_put_db_failure_compensates_pointer(
     dir_b.mkdir()
     async with session_factory() as sess:
         await save_app_settings(
-            sess, setup_completed=True, now=1000.0, report_directory=str(dir_a)
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
         )
     write_report_pointer(data_dir, dir_a)
 
@@ -1279,7 +1312,11 @@ async def test_settings_put_db_failure_compensates_pointer(
         raise RuntimeError("simulated database failure")
 
     monkeypatch.setattr(web_app_module, "save_app_settings", _db_boom)
-    app = create_app(session_factory=session_factory, report_pointer_file=pointer_file)
+    app = create_app(
+        session_factory=session_factory,
+        report_pointer_file=pointer_file,
+        credential_store=_RunnableCredentials(),
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://t"
     ) as client:
@@ -1331,7 +1368,11 @@ async def test_settings_put_clear_pointer_failure_blocks_db_commit(
     dir_a.mkdir()
     async with session_factory() as sess:
         await save_app_settings(
-            sess, setup_completed=True, now=1000.0, report_directory=str(dir_a)
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
         )
     write_report_pointer(data_dir, dir_a)
 
@@ -1339,7 +1380,11 @@ async def test_settings_put_clear_pointer_failure_blocks_db_commit(
         raise OSError("simulated pointer clear failure")
 
     monkeypatch.setattr(web_app_module, "write_report_pointer", _broken)
-    app = create_app(session_factory=session_factory, report_pointer_file=pointer_file)
+    app = create_app(
+        session_factory=session_factory,
+        report_pointer_file=pointer_file,
+        credential_store=_RunnableCredentials(),
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://t"
     ) as client:
@@ -1474,10 +1519,18 @@ async def test_settings_put_cancellation_compensates_pointer(
     dir_b.mkdir()
     async with session_factory() as sess:
         await save_app_settings(
-            sess, setup_completed=True, now=1000.0, report_directory=str(dir_a)
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
         )
     write_report_pointer(data_dir, dir_a)
-    app = create_app(session_factory=session_factory, report_pointer_file=pointer_file)
+    app = create_app(
+        session_factory=session_factory,
+        report_pointer_file=pointer_file,
+        credential_store=_RunnableCredentials(),
+    )
 
     async def assert_compensated() -> None:
         async with session_factory() as sess:
@@ -1549,7 +1602,11 @@ async def test_settings_put_post_commit_failure_never_compensates(
     dir_b.mkdir()
     async with session_factory() as sess:
         await save_app_settings(
-            sess, setup_completed=True, now=1000.0, report_directory=str(dir_a)
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
         )
     write_report_pointer(data_dir, dir_a)
 
@@ -1568,6 +1625,7 @@ async def test_settings_put_post_commit_failure_never_compensates(
         session_factory=session_factory,
         report_pointer_file=pointer_file,
         model_service=_HangingReconcile(),  # type: ignore[arg-type]
+        credential_store=_RunnableCredentials(),
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://t"
@@ -1581,7 +1639,8 @@ async def test_settings_put_post_commit_failure_never_compensates(
                 },
             )
         )
-        await entered.wait()
+        # bounded: a regression that rejects the PUT must FAIL here, not hang
+        await asyncio.wait_for(entered.wait(), timeout=10)
         task.cancel()  # cancel AFTER the commit, during the reconcile
         with pytest.raises(asyncio.CancelledError):
             await task

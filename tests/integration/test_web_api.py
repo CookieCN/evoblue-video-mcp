@@ -105,18 +105,24 @@ async def test_cancel_queued_job(
 async def test_settings_roundtrip(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    async with _client(session_factory) as client:
+    app = create_app(session_factory=session_factory, credential_store=_MemoryCredentials())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
         resp = await client.get("/api/settings")
         assert resp.status_code == 200
         assert resp.json()["setup_completed"] is False
 
+        # completing setup requires a runnable LLM configuration (P1 review)
         resp = await client.put(
             "/api/settings",
             json={
                 "setup_completed": True,
                 "report_directory": "C:/reports",
                 "llm_provider": "openai",
+                "llm_base_url": "https://api.openai.com/v1",
                 "llm_model": "gpt-5",
+                "llm_api_key": "sk-roundtrip",
             },
         )
         assert resp.status_code == 200
@@ -160,10 +166,20 @@ async def test_settings_accept_known_asr_provider(
 async def test_settings_explicit_null_clears_field(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    async with _client(session_factory) as client:
+    app = create_app(session_factory=session_factory, credential_store=_MemoryCredentials())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
         await client.put(
             "/api/settings",
-            json={"setup_completed": True, "report_directory": "C:/reports"},
+            json={
+                "setup_completed": True,
+                "report_directory": "C:/reports",
+                "llm_provider": "openai",
+                "llm_base_url": "https://api.openai.com/v1",
+                "llm_model": "gpt-5",
+                "llm_api_key": "sk-null",
+            },
         )
 
         # Explicit null clears the field; omitted fields keep their old value.
@@ -348,3 +364,203 @@ async def test_cancel_survives_concurrent_writer_commit(
     with pytest.raises(sqlalchemy.exc.OperationalError):
         await run_cancel("cancel-race-2")
     monkeypatch.undo()
+
+
+async def test_setup_completed_requires_runnable_llm_configuration(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """P1 review round 2: the backend, not just the UI, enforces the worker gate."""
+    app = create_app(session_factory=session_factory, credential_store=_MemoryCredentials())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # 1) bare completion on a fresh install -> rejected, nothing persisted
+        r = await client.put("/api/settings", json={"setup_completed": True})
+        assert r.status_code == 400
+        assert "不可运行" in r.json()["detail"]
+        state = (await client.get("/api/settings")).json()
+        assert state["setup_completed"] is False
+
+        # 2) provider/base/model without any key -> still not runnable
+        r = await client.put(
+            "/api/settings",
+            json={
+                "setup_completed": True,
+                "llm_provider": "openai",
+                "llm_base_url": "https://api.openai.com/v1",
+                "llm_model": "gpt-5",
+            },
+        )
+        assert r.status_code == 400
+        state = (await client.get("/api/settings")).json()
+        assert state["setup_completed"] is False
+
+        # 3) with the key the same PUT completes
+        r = await client.put(
+            "/api/settings",
+            json={
+                "setup_completed": True,
+                "llm_provider": "openai",
+                "llm_base_url": "https://api.openai.com/v1",
+                "llm_model": "gpt-5",
+                "llm_api_key": "sk-runnable",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["setup_completed"] is True
+        assert r.json()["llm_api_key_configured"] is True
+
+
+async def test_provider_switch_requires_new_key(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Switching provider points the credential ref at an empty slot: the
+    runnable invariant must hold against the FINAL ref, not the old key."""
+    credentials = _MemoryCredentials()
+    app = create_app(session_factory=session_factory, credential_store=credentials)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        base = {
+            "llm_provider": "deepseek",
+            "llm_base_url": "https://api.deepseek.com",
+            "llm_model": "deepseek-chat",
+            "llm_api_key": "sk-deepseek",
+            "setup_completed": True,
+        }
+        assert (await client.put("/api/settings", json=base)).status_code == 200
+
+        # switch provider, keep the old key by omitting llm_api_key -> reject
+        switched = dict(base, llm_provider="openai")
+        switched.pop("llm_api_key")
+        switched["llm_base_url"] = "https://api.openai.com/v1"
+        switched["llm_model"] = "gpt-5"
+        r = await client.put("/api/settings", json=switched)
+        assert r.status_code == 400
+        state = (await client.get("/api/settings")).json()
+        assert state["llm_provider"] == "deepseek", "rejected save must not persist"
+
+        # same switch WITH the new key -> accepted
+        switched["llm_api_key"] = "sk-openai"
+        r = await client.put("/api/settings", json=switched)
+        assert r.status_code == 200
+        state = (await client.get("/api/settings")).json()
+        assert state["llm_provider"] == "openai"
+        assert state["llm_api_key_configured"] is True
+
+
+async def test_empty_key_payload_counts_as_deleted_for_invariant(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An explicit empty llm_api_key deletes the stored secret: completing
+    setup in the same request must be rejected even though the OLD key still
+    sits in the credential store."""
+    credentials = _MemoryCredentials()
+    app = create_app(session_factory=session_factory, credential_store=credentials)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        base = {
+            "llm_provider": "deepseek",
+            "llm_base_url": "https://api.deepseek.com",
+            "llm_model": "deepseek-chat",
+            "llm_api_key": "sk-deepseek",
+            "setup_completed": True,
+        }
+        assert (await client.put("/api/settings", json=base)).status_code == 200
+
+        r = await client.put(
+            "/api/settings",
+            json={"llm_api_key": "", "setup_completed": True},
+        )
+        assert r.status_code == 400
+        state = (await client.get("/api/settings")).json()
+        assert state["setup_completed"] is True, "earlier completion survives"
+
+
+async def test_same_provider_with_stored_key_allows_bare_completion(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The legitimate leave-key-empty path: same provider, key in the store."""
+    credentials = _MemoryCredentials()
+    app = create_app(session_factory=session_factory, credential_store=credentials)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        base = {
+            "llm_provider": "deepseek",
+            "llm_base_url": "https://api.deepseek.com",
+            "llm_model": "deepseek-chat",
+            "llm_api_key": "sk-deepseek",
+            "setup_completed": True,
+        }
+        assert (await client.put("/api/settings", json=base)).status_code == 200
+
+        r = await client.put("/api/settings", json={"setup_completed": True})
+        assert r.status_code == 200
+        assert r.json()["llm_api_key_configured"] is True
+
+
+async def test_partial_update_on_completed_record_cannot_break_runnability(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """P1 review round 3: the gate watches the FINAL state, not the payload.
+
+    An already-completed record must not be degradable through a partial
+    update that omits setup_completed — deleting the key or switching the
+    provider would otherwise persist while the flag stays true and the worker
+    stays idle.
+    """
+    credentials = _MemoryCredentials()
+    app = create_app(session_factory=session_factory, credential_store=credentials)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        base = {
+            "llm_provider": "deepseek",
+            "llm_base_url": "https://api.deepseek.com",
+            "llm_model": "deepseek-chat",
+            "llm_api_key": "sk-deepseek",
+            "setup_completed": True,
+        }
+        assert (await client.put("/api/settings", json=base)).status_code == 200
+
+        # 1) delete the key WITHOUT carrying setup_completed -> rejected,
+        #    database and keyring both unchanged
+        r = await client.put("/api/settings", json={"llm_api_key": ""})
+        assert r.status_code == 400
+        state = (await client.get("/api/settings")).json()
+        assert state["setup_completed"] is True
+        assert state["llm_api_key_configured"] is True
+        assert credentials.values == {"llm:deepseek": "sk-deepseek"}
+
+        # 2) switch provider WITHOUT a new key -> rejected, unchanged
+        r = await client.put(
+            "/api/settings",
+            json={
+                "llm_provider": "openai",
+                "llm_base_url": "https://api.openai.com/v1",
+                "llm_model": "gpt-5",
+            },
+        )
+        assert r.status_code == 400
+        state = (await client.get("/api/settings")).json()
+        assert state["llm_provider"] == "deepseek"
+        assert credentials.values == {"llm:deepseek": "sk-deepseek"}
+
+        # 3) partial updates that keep runnability stay allowed
+        r = await client.put(
+            "/api/settings", json={"report_directory": "C:/reports"}
+        )
+        assert r.status_code == 200
+
+        # 4) explicit downgrade is the sanctioned way out: allowed, keyring
+        #    and database reflect the degraded state
+        r = await client.put(
+            "/api/settings", json={"llm_api_key": "", "setup_completed": False}
+        )
+        assert r.status_code == 200
+        state = (await client.get("/api/settings")).json()
+        assert state["setup_completed"] is False
+        assert state["llm_api_key_configured"] is False
+        assert credentials.values == {}

@@ -23,10 +23,12 @@ idempotent and a fresh install converges on the same schema as an upgrade.
 
 1. **Forward-only.** There is no automated downgrade path. A schema change is a
    new versioned migration; editing an already-released migration is a defect.
-2. **Backup before upgrade (P7 installer requirement).** The installer copies
-   `evoblue.db` to `evoblue.db.bak-<old-version>` before running a new version.
-   Rollback = restore the backup alongside the previous bundle. Data written by
-   the newer version after the upgrade is not preserved.
+2. **Backup before upgrade (P7).** The engine snapshots the database with the
+   SQLite backup API to `evoblue.db.bak-v<old-schema-version>` before applying
+   any version jump (INSTALLER_RELEASE_CONTRACT §6; fail-open — a failed backup
+   logs `MIGRATION_BACKUP_FAILED` and the migration proceeds). Rollback =
+   restore the backup alongside the previous bundle. Data written by the newer
+   version after the upgrade is not preserved.
 3. **Markdown is the recovery asset.** Completed reports exist as Markdown files
    on disk independently of SQLite (`docs/MARKDOWN_SCHEMA.md`); a catastrophic
    database loss is recoverable by the index rebuild (P3, `docs/PRD.md`).

@@ -109,11 +109,21 @@ def kernel_verifier() -> HandshakeVerifier:
     return _verify
 
 
+#: The packaged entry form (INSTALLER_RELEASE_CONTRACT §5): a frozen engine
+#: exe runs the STDIO bridge via its "bridge" subcommand. Mutually exclusive
+#: with the source form ("-m", "evoblue_video_mcp.mcp"); the branch is keyed
+#: on sys.frozen, so source/venv processes never produce this payload.
+FROZEN_BRIDGE_ARGS = ("bridge",)
+
+
 def default_payload(engine_port: int = _DEFAULT_PORT) -> EntryPayload:
     """The frozen entry payload (contract §3): no tokens, env only when needed."""
     env: tuple[tuple[str, str], ...] = ()
     if engine_port != _DEFAULT_PORT:
         env = (("EVOBLUE_ENGINE_PORT", str(engine_port)),)
+    if getattr(sys, "frozen", False):
+        # Packaged form: the engine exe itself is the bridge entry point.
+        return EntryPayload(command=sys.executable, args=FROZEN_BRIDGE_ARGS, env=env)
     return EntryPayload(command=sys.executable, args=("-m", "evoblue_video_mcp.mcp"), env=env)
 
 

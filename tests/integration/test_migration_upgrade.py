@@ -287,3 +287,87 @@ async def test_fresh_install_matches_upgraded_v2(tmp_path) -> None:
 
     await fresh_engine.dispose()
     await v2_engine.dispose()
+
+
+async def test_upgrade_creates_versioned_backup(tmp_path) -> None:
+    """P7-005 (contract §6): a version jump snapshots the db as evoblue.db.bak-v7."""
+    db_path = tmp_path / "evoblue.db"
+    engine7 = build_engine(db_path)
+    await init_db(engine7, target_version=7)
+    await engine7.dispose()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO jobs (job_id, request_fingerprint, url, mode, asr, "
+        "config_fingerprint, status, progress, attempt, max_attempts, "
+        "retryable, created_at, updated_at) VALUES "
+        "('job-backup', 'fp-backup', 'https://www.youtube.com/watch?v=x', "
+        "'auto', 'auto', 'cfg', 'completed', 100, 1, 3, 0, 1000.0, 2000.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    engine = build_engine(db_path)
+    await init_db(engine)
+    await engine.dispose()
+
+    backup = tmp_path / "evoblue.db.bak-v7"
+    assert backup.is_file(), "upgrade must snapshot the pre-migration database"
+    snap = sqlite3.connect(f"file:{backup.as_posix()}?mode=ro", uri=True)
+    try:
+        version = snap.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        assert version == 7
+        legacy = snap.execute(
+            "SELECT status FROM jobs WHERE job_id = 'job-backup'"
+        ).fetchone()[0]
+        assert legacy == "completed"
+    finally:
+        snap.close()
+
+
+async def test_fresh_init_creates_no_backup(tmp_path) -> None:
+    engine = build_engine(tmp_path / "evoblue.db")
+    await init_db(engine)
+    await engine.dispose()
+    assert not (tmp_path / "evoblue.db.bak-v0").exists()
+    assert not list(tmp_path.glob("*.bak-*"))
+
+
+async def test_no_backup_when_already_current(tmp_path) -> None:
+    db_path = tmp_path / "evoblue.db"
+    engine = build_engine(db_path)
+    await init_db(engine)
+    await engine.dispose()
+    engine2 = build_engine(db_path)
+    await init_db(engine2)  # no-op at current version
+    await engine2.dispose()
+    assert not list(tmp_path.glob("*.bak-*"))
+
+
+async def test_backup_failure_does_not_block_migration(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Fail-open per contract §6: MIGRATION_BACKUP_FAILED, migration proceeds."""
+    import logging
+
+    db_path = tmp_path / "evoblue.db"
+    engine7 = build_engine(db_path)
+    await init_db(engine7, target_version=7)
+    await engine7.dispose()
+
+    from evoblue_video_mcp.storage import backup as backup_mod
+
+    def broken_snapshot(src, dst):
+        raise sqlite3.OperationalError("injected failure")
+
+    monkeypatch.setattr(backup_mod, "_snapshot", broken_snapshot)
+    with caplog.at_level(logging.WARNING):
+        engine = build_engine(db_path)
+        await init_db(engine)
+    async with engine.connect() as conn:
+        version = (
+            await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))
+        ).scalar()
+        assert version == SCHEMA_VERSION
+    await engine.dispose()
+    assert any("MIGRATION_BACKUP_FAILED" in r.message for r in caplog.records)
