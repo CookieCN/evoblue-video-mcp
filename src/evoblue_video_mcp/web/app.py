@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from httpx import AsyncClient as _HttpClient
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from typing_extensions import TypedDict
 
 from evoblue_video_mcp import __version__
 from evoblue_video_mcp.application.client_config.errors import ClientConfigError

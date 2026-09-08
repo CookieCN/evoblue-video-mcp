@@ -20,6 +20,7 @@ Status: 2026-09-07（P8-001）。每行把一个真实失败模式钉到「护�
 | 12 | 模型下载中断 | 进度持久化，恢复网络后断点续传 | 自动续传或取消后重试 | ASR-2 续传测试（真实中断/坏 partial 回退） |
 | 13 | 未签名程序被 SmartScreen/杀软拦截 | Release notes 与 SUPPORT 的放行指引 | 「更多信息 → 仍要运行」/加白名单 | `docs/SUPPORT.md`（人工清单项，无自动化） |
 | 14 | MCP 客户端先于 Engine 启动 | 工具返回 `ENGINE_NOT_READY`（retryable）+ 启动指引 | 启动 EvoBlue（自启动已默认兜底） | `tests/integration/test_bridge_stdio.py` 离线用例、ADR 0004 |
+| 15 | Qwen3 多文件下载缺失、被替换或混入额外文件 | 安装转 failed，模型不激活，旧模型不受影响 | 保留可信断点或清理坏文件后重试 | `tests/unit/test_asr_manifest.py::test_file_set_requires_safe_source_paths_and_pinned_fingerprint`、`tests/unit/test_model_manager.py::test_install_file_set_rejects_tampered_or_extra_files` |
 
 ## 维护规则
 

@@ -55,10 +55,12 @@ _MANAGED: dict[str, tuple[str, ASRProvider | None]] = {}
 _WHISPER_PROVIDER_ID = "whisper-cpp-base"
 _STANDARD_PROVIDER_ID = "sherpa-onnx-standard"
 _LITE_PROVIDER_ID = "sherpa-onnx-lite"
+_QWEN3_PROVIDER_ID = "sherpa-onnx-qwen3"
 
 _WHISPER_MODEL_SUBPATH = Path("whisper-cpp-base") / "80da2d8" / "ggml-base.bin"
 _STANDARD_SUBDIR = Path("sensevoice-small-int8") / "2024-07-17"
 _LITE_SUBDIR = Path("zipformer-ctc-small-zh-int8") / "2025-07-16"
+_QWEN3_SUBDIR = Path("qwen3-asr-0.6b-int8") / "2026-03-25"
 
 
 def register_available_asr_providers(
@@ -182,6 +184,7 @@ def _reconcile_sherpa(model_dir: Path | None) -> None:
     ):
         _reconcile_managed(_STANDARD_PROVIDER_ID, None, None)
         _reconcile_managed(_LITE_PROVIDER_ID, None, None)
+        _reconcile_managed(_QWEN3_PROVIDER_ID, None, None)
         return
 
     vad = str(vad_model)
@@ -223,9 +226,75 @@ def _reconcile_sherpa(model_dir: Path | None) -> None:
     else:
         _reconcile_managed(_LITE_PROVIDER_ID, None, None)
 
+    qwen3_dir = Path(model_dir) / _QWEN3_SUBDIR
+    qwen3_sig = _qwen3_signature(qwen3_dir, vad)
+    if qwen3_sig is not None:
+        _reconcile_managed(
+            _QWEN3_PROVIDER_ID,
+            qwen3_sig,
+            lambda: _build_sherpa(
+                provider_id=_QWEN3_PROVIDER_ID,
+                family="qwen3_asr",
+                model_id="qwen3-asr-0.6b-int8",
+                model_version="2026-03-25",
+                tier_dir=qwen3_dir,
+                languages=frozenset(
+                    {
+                        "zh",
+                        "en",
+                        "yue",
+                        "ar",
+                        "de",
+                        "fr",
+                        "es",
+                        "pt",
+                        "id",
+                        "it",
+                        "ko",
+                        "ru",
+                        "th",
+                        "vi",
+                        "ja",
+                        "tr",
+                        "hi",
+                        "ms",
+                        "nl",
+                        "sv",
+                        "da",
+                        "fi",
+                        "pl",
+                        "cs",
+                        "fil",
+                        "fa",
+                        "el",
+                        "hu",
+                        "mk",
+                        "ro",
+                    }
+                ),
+                vad=vad,
+            ),
+        )
+    else:
+        _reconcile_managed(_QWEN3_PROVIDER_ID, None, None)
+
 
 def _tier_signature(tier_dir: Path, vad: str) -> str | None:
     if (tier_dir / "model.int8.onnx").is_file() and (tier_dir / "tokens.txt").is_file():
+        return f"dir={tier_dir}|vad={vad}"
+    return None
+
+
+def _qwen3_signature(tier_dir: Path, vad: str) -> str | None:
+    required = (
+        "conv_frontend.onnx",
+        "encoder.int8.onnx",
+        "decoder.int8.onnx",
+        "tokenizer/vocab.json",
+        "tokenizer/merges.txt",
+        "tokenizer/tokenizer_config.json",
+    )
+    if all((tier_dir / relative).is_file() for relative in required):
         return f"dir={tier_dir}|vad={vad}"
     return None
 
@@ -251,6 +320,16 @@ def _build_sherpa(
             model_path=str(tier_dir / "model.int8.onnx"),
             tokens_path=str(tier_dir / "tokens.txt"),
             languages=languages,
+            conv_frontend_path=(
+                str(tier_dir / "conv_frontend.onnx") if family == "qwen3_asr" else ""
+            ),
+            encoder_path=(
+                str(tier_dir / "encoder.int8.onnx") if family == "qwen3_asr" else ""
+            ),
+            decoder_path=(
+                str(tier_dir / "decoder.int8.onnx") if family == "qwen3_asr" else ""
+            ),
+            tokenizer_path=str(tier_dir / "tokenizer") if family == "qwen3_asr" else "",
         ),
         vad_model_path=vad,
     )

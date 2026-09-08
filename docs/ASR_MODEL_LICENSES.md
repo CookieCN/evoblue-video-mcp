@@ -1,6 +1,6 @@
 # ASR Model Licenses & Attribution
 
-ASR-1 引入的精确模型制品、已知许可证证据与署名清单。基础安装包**仅**随包附带 Silero VAD（MIT、可再分发、钉 SHA 校验的受管运行时依赖，见下方 VAD 一节）；识别模型 Lite/Standard 与 Whisper Base 权重不随包分发，由 Model Manager（ASR-2）按需下载、校验后安装。本清单用于安装前展示与第三方声明，禁止生产 Manifest 下载同时含 FP32 与 INT8 权重的 SenseVoice 完整包。
+ASR-1 引入的精确模型制品、已知许可证证据与署名清单。基础安装包**仅**随包附带 Silero VAD（MIT、可再分发、钉 SHA 校验的受管运行时依赖，见下方 VAD 一节）；识别模型 Lite/Standard、Qwen3-ASR 与 Whisper Base 权重不随包分发，由 Model Manager 按需下载、校验后安装。本清单用于安装前展示与第三方声明，禁止生产 Manifest 下载同时含 FP32 与 INT8 权重的 SenseVoice 完整包。
 
 本文件是工程合规清单，不是法律意见。代码仓库许可证、训练数据许可证和模型权重许可证不得相互代替；只有精确制品的再分发条款、署名要求和中国下载源全部留证后，Manifest 才能标记为可发布。
 
@@ -29,6 +29,22 @@ ASR-1 引入的精确模型制品、已知许可证证据与署名清单。基�
 - 再分发状态：**暂不落镜像**（归档无许可证文件）；须向精确制品发布者确认再分发条款后才能配置镜像，见 `docs/ASR_CHINA_SOURCE_QUALIFICATION.md`
 - Attribution：k2-fsa sherpa-onnx / icefall — https://github.com/k2-fsa/icefall
 - Evidence sources：https://github.com/wenet-e2e/wenet/blob/main/docs/pretrained_models.md 、https://github.com/wenet-e2e/WenetSpeech 、https://github.com/k2-fsa/icefall/blob/master/LICENSE
+
+## Optional multilingual — Qwen3-ASR 0.6B INT8
+
+- Tier：Qwen3 多语言增强（可选，非正式默认）
+- Model：Qwen3-ASR 0.6B，经 sherpa-onnx 兼容 ONNX INT8 导出
+- 覆盖：30 种语言 + 22 种中文方言（能力范围来自 Qwen 官方模型说明）
+- 来源：Alibaba Qwen 官方模型；ONNX 导出由 ModelScope 用户 `zengshuishui` 发布
+- 精确来源提交：`9c182309f7bb075f241424441add9e16c5086dfb`
+- 下载/安装体积：987,023,031 bytes（约 941 MiB），9 个文件逐一 SHA-256 校验
+- 许可证：Apache-2.0（Qwen3-ASR 官方代码/模型说明与该 ONNX 导出页均标记）
+- 再分发状态：`mirror_approved`；只从固定 ModelScope 提交按文件下载，不由 EvoBlue
+  重新托管，不接受 `master` 漂移，具体文件哈希见 `asr/manifests.py`
+- Runtime：复用 full 变体已有 sherpa-onnx/ONNX Runtime，不引入 PyTorch、Transformers
+  或 vLLM；要求 sherpa-onnx ≥ 1.12.34
+- Attribution：Qwen (Alibaba Cloud) / zengshuishui ONNX export
+- Evidence：https://github.com/QwenLM/Qwen3-ASR 、https://k2-fsa.github.io/sherpa/onnx/qwen3-asr/pretrained.html 、https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx
 
 ## VAD — Silero VAD
 

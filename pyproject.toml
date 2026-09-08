@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evoblue-video-mcp"
-version = "0.9.0b1"
+version = "0.9.0b2"
 description = "Local-first video understanding and Markdown knowledge management"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -22,6 +22,7 @@ dependencies = [
   "sqlalchemy[asyncio]>=2,<3",
   "structlog>=25,<26",
   "tenacity>=9,<10",
+  "typing_extensions>=4.6,<5",
   "uvicorn[standard]>=0.34,<1",
   "yt-dlp>=2025.1.26"
 ]

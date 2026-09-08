@@ -3,6 +3,40 @@
 from dataclasses import dataclass
 
 SENSEVOICE_LANGUAGES = frozenset({"zh", "en", "ja", "ko", "yue"})
+QWEN3_LANGUAGES = frozenset(
+    {
+        "zh",
+        "en",
+        "yue",
+        "ar",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "id",
+        "it",
+        "ko",
+        "ru",
+        "th",
+        "vi",
+        "ja",
+        "tr",
+        "hi",
+        "ms",
+        "nl",
+        "sv",
+        "da",
+        "fi",
+        "pl",
+        "cs",
+        "fil",
+        "fa",
+        "el",
+        "hu",
+        "mk",
+        "ro",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -57,16 +91,23 @@ def route_asr(
         if pinned is None:
             raise ValueError(f"unknown ASR provider {preference!r}")
         if not _supports(pinned, lang):
-            raise ValueError(f"ASR provider {preference!r} does not support language {lang!r}")
+            raise ValueError(
+                f"ASR provider {preference!r} does not support language {lang!r}"
+            )
         return _decision(pinned)
 
     compatible = [option for option in options if _supports(option, lang)]
     installed = [option for option in compatible if option.installed]
     preferred_ids: tuple[str, ...]
     if lang in SENSEVOICE_LANGUAGES or lang is None:
-        preferred_ids = ("sherpa-onnx-standard", "sherpa-onnx-lite", "whisper-cpp-base")
+        preferred_ids = (
+            "sherpa-onnx-standard",
+            "sherpa-onnx-qwen3",
+            "sherpa-onnx-lite",
+            "whisper-cpp-base",
+        )
     else:
-        preferred_ids = ("whisper-cpp-base",)
+        preferred_ids = ("sherpa-onnx-qwen3", "whisper-cpp-base")
 
     for provider_id in preferred_ids:
         option = next((item for item in installed if item.provider_id == provider_id), None)

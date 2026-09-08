@@ -29,6 +29,15 @@ WHISPER = ProviderOption(
     installed=False,
     formal_default=False,
 )
+QWEN = ProviderOption(
+    provider_id="sherpa-onnx-qwen3",
+    model_id="qwen3-asr-0.6b-int8",
+    model_version="2026-03-25",
+    tier="qwen3",
+    languages=frozenset({"zh", "en", "fr"}),
+    installed=False,
+    formal_default=False,
+)
 
 
 def test_chinese_missing_model_recommends_standard_not_unlicensed_lite() -> None:
@@ -50,9 +59,16 @@ def test_sensevoice_language_never_recommends_whisper() -> None:
 
 
 def test_language_outside_sensevoice_recommends_whisper() -> None:
-    decision = route_asr("fr", "auto", (STANDARD, WHISPER))
+    decision = route_asr("fr", "auto", (STANDARD, QWEN, WHISPER))
     assert decision.provider_id == "whisper-cpp-base"
     assert decision.installed is False
+
+
+def test_installed_qwen_is_reused_for_its_multilingual_coverage() -> None:
+    installed_qwen = QWEN.__class__(**{**QWEN.__dict__, "installed": True})
+    decision = route_asr("fr", "auto", (STANDARD, installed_qwen, WHISPER))
+    assert decision.provider_id == "sherpa-onnx-qwen3"
+    assert decision.installed is True
 
 
 def test_user_pinned_provider_overrides_automatic_routing() -> None:

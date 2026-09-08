@@ -65,6 +65,7 @@ class AppSettingsUpdate(StrictModel):
         "auto",
         "sherpa-onnx-lite",
         "sherpa-onnx-standard",
+        "sherpa-onnx-qwen3",
         "whisper-cpp-base",
     ] | None = None
     whisper_cpp_executable: str | None = None

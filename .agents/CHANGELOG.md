@@ -4,6 +4,10 @@
 
 ### Added
 
+- Release 版本升级到 `0.9.0b2` / `0.9.0-beta.2`，用于区分包含 Qwen3-ASR 国内安装选项的新安装包与已发布的 beta.1 产物。
+
+- ASR-5 Qwen3-ASR 可选模型（2026-09-08）：新增 `qwen3-asr-0.6b-int8@2026-03-25` 与 WebUI/设置 Provider 选项，复用 sherpa-onnx 原生 `from_qwen3_asr`；Model Manager 新增多文件 `file-set` 合同与安全安装链（安全嵌套路径、逐文件 SHA-256/大小、集合指纹、Range 续传、原子晋升）。国内源固定到 ModelScope ONNX 导出提交 `9c182309f7bb075f241424441add9e16c5086dfb`，总计 987,023,031 bytes；实测固定 URL 返回 206 Range。Qwen3 只在已安装或用户明确固定时使用，独立门禁前不替换 Standard 正式默认；基础安装包体积不增加模型权重。
+
 - 发布评审第三轮修复（2026-09-08）：可运行不变量改为校验最终状态（`payload.setup_completed ?? current.setup_completed`）——已完成配置上的局部更新（删 Key/切 Provider/清模型）不再能静默保留 true 标志；显式 `setup_completed=false` 为唯一降级出口。回归测试四段（含 DB+keyring 双不变断言）。
 - 发布评审第二轮修复（2026-09-08，P1 后端+前端双层闭环）：`setupReady` 要求 Key（新填，或 Provider 未变且已配置）；`PUT /api/settings` 提交 `setup_completed=true` 前按合并后配置 + keyring 实际结果强制可运行不变量（400 拒绝，含空 Key 删除语义缺口），前端绕不过；新增后端 4 + 前端 3 个不变量测试。
 - 发布评审修复轮（2026-09-07，4 P1 + 1 P2）：设置页首次配置表单（LLM 四要素 + 报告目录，`setup_completed` 不可再单独提交）；`scripts/check_release_tag.py` npm 归一化 tag 门禁 + 行为测试；release.yml smoke 日志双文件（PowerShell 禁止双流同文件）；卸载钩子无条件清理 `[Code]` 写入的 install-version.txt（静默卸载不再残留安装目录）；env 提供的 `EVOBLUE_LOCAL_TOKEN` 进入浏览器引导 fragment。真机验收 16/16 复跑；699 passed 两轮 + 前端 16 测试全绿。

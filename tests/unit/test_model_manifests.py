@@ -4,18 +4,19 @@ from evoblue_video_mcp.asr.manifest import is_releasable
 from evoblue_video_mcp.asr.manifests import BUILTIN_MANIFESTS, get_builtin_manifest
 
 
-def test_builtin_manifests_are_releasable_and_upstream_only() -> None:
+def test_builtin_manifests_are_releasable_with_only_approved_sources() -> None:
     ids = {manifest.model_id for manifest in BUILTIN_MANIFESTS}
     assert ids == {
         "sensevoice-small-int8",
+        "qwen3-asr-0.6b-int8",
         "whisper-cpp-base",
         "zipformer-ctc-small-zh-int8",
     }
     for manifest in BUILTIN_MANIFESTS:
         assert is_releasable(manifest) is True
-        assert manifest.redistribution == "upstream_only"
-        # No mirror/cdn may ship yet: only the pinned original publisher URL.
-        assert all(source.kind == "upstream" for source in manifest.sources)
+        assert manifest.redistribution in {"upstream_only", "mirror_approved"}
+        if manifest.redistribution == "upstream_only":
+            assert all(source.kind == "upstream" for source in manifest.sources)
 
 
 def test_get_builtin_manifest() -> None:
@@ -34,6 +35,14 @@ def test_get_builtin_manifest() -> None:
     assert whisper.version == "80da2d8"
     assert whisper.languages == ("*",)
     assert whisper.archive_format == "raw"
+
+    qwen = get_builtin_manifest("qwen3-asr-0.6b-int8")
+    assert qwen is not None
+    assert qwen.version == "2026-03-25"
+    assert qwen.archive_format == "file-set"
+    assert qwen.sources[0].kind == "china-primary"
+    assert qwen.sources[0].url.startswith("https://modelscope.cn/")
+    assert "/resolve/master" not in qwen.sources[0].url
 
     assert get_builtin_manifest("unknown") is None
 

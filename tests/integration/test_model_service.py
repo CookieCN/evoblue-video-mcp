@@ -57,6 +57,7 @@ async def test_list_models_reports_builtin_models(
     ids = {m.model_id for m in models}
     assert ids == {
         "sensevoice-small-int8",
+        "qwen3-asr-0.6b-int8",
         "whisper-cpp-base",
         "zipformer-ctc-small-zh-int8",
     }
@@ -66,7 +67,7 @@ async def test_list_models_reports_builtin_models(
         assert model.status is None
         assert model.compressed_size_bytes > 0
         assert model.installed_size_bytes > 0
-        assert model.redistribution == "upstream_only"
+        assert model.redistribution in {"upstream_only", "mirror_approved"}
 
 
 async def test_install_unknown_model_raises(

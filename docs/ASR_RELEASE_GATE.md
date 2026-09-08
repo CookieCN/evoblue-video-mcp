@@ -13,6 +13,7 @@ Thresholds: frozen v1 in `src/evoblue_video_mcp/asr/release_gate.py`
 |---|---|---|---|
 | Standard | `sensevoice-small-int8` @ `2024-07-17` | **PASS** (all 5 items) | **Yes** |
 | Lite | `zipformer-ctc-small-zh-int8` @ `2025-07-16` | **FAIL** (entity recall 0.50 < 0.60) | No |
+| Qwen3 multilingual | `qwen3-asr-0.6b-int8` @ `2026-03-25` | Not measured (new optional candidate) | No |
 | Multilingual fallback | `whisper-cpp-base` @ `80da2d8` | Not measured (no pinned CLI runtime) | No |
 
 The machine-readable approval record lives in `src/evoblue_video_mcp/asr/approvals.py`, keyed
@@ -82,6 +83,10 @@ brand names embedded in Chinese/mixed text ("TikTok Shop", "ChatGPT") and entity
   (`docs/ASR_MODEL_LICENSES.md`), so even a quality pass would not have approved it.
 - **whisper.cpp Base** remains the documented out-of-coverage fallback recommendation with a
   clean MIT license; no formal default claim is made because no benchmark has been measured.
+- **Qwen3-ASR 0.6B INT8** is installable and explicitly selectable. If already installed,
+  automatic routing may reuse it for its declared multilingual coverage; it is not recommended
+  as a first download or marked formal default until its own quality/CPU/memory/mainland-network
+  gate is recorded.
 - Routing recommendations are unchanged; the *rationale* moved from "license unconfirmed" to the
   recorded gate verdict (`asr/routing.py`, `asr/approvals.py`).
 

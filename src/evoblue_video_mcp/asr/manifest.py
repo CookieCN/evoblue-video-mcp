@@ -7,6 +7,7 @@ status, and approved-download-host enforcement so the installer can reject
 unapproved sources and undeclared files.
 """
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -79,6 +80,7 @@ class ModelFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str
+    source_path: str | None = None
     size_bytes: int = Field(gt=0)
     sha256: str
 
@@ -92,9 +94,40 @@ class ModelFile(BaseModel):
     @field_validator("name")
     @classmethod
     def _validate_name(cls, value: str) -> str:
-        if ".." in value or "/" in value or "\\" in value or not _SLUG_RE.match(value):
-            raise ValueError("file name must be a path-safe slug")
-        return value
+        return _validate_relative_path(value, "file name")
+
+    @field_validator("source_path")
+    @classmethod
+    def _validate_source_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_relative_path(value, "source path")
+
+
+def _validate_relative_path(value: str, label: str) -> str:
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
+    if (
+        normalized.startswith("/")
+        or len(parts) > 8
+        or any(part in {"", ".", ".."} or not _SLUG_RE.match(part) for part in parts)
+    ):
+        raise ValueError(f"{label} must be a safe relative path")
+    return normalized
+
+
+def file_set_fingerprint(files: tuple[ModelFile, ...]) -> str:
+    """Return the pinned identity of a multi-file snapshot manifest.
+
+    Each downloaded file is still verified against its own SHA-256.  This
+    fingerprint binds the ordered remote/local path mapping and sizes into the
+    existing single ``expected_sha256`` download-operation field.
+    """
+    hasher = hashlib.sha256()
+    for file in files:
+        row = f"{file.name}\0{file.source_path or ''}\0{file.size_bytes}\0{file.sha256}\n"
+        hasher.update(row.encode("utf-8"))
+    return hasher.hexdigest()
 
 
 class ModelManifest(BaseModel):
@@ -111,7 +144,7 @@ class ModelManifest(BaseModel):
     attribution: str = Field(min_length=1)
     upstream_url: str = Field(min_length=1)
     redistribution: Literal["upstream_only", "mirror_approved", "blocked"]
-    archive_format: Literal["tar.bz2", "tar.gz", "zip", "raw"]
+    archive_format: Literal["tar.bz2", "tar.gz", "zip", "raw", "file-set"]
     sources: tuple[DownloadSource, ...] = Field(min_length=1)
     files: tuple[ModelFile, ...] = Field(min_length=1)
 
@@ -142,6 +175,16 @@ class ModelManifest(BaseModel):
         names = [file.name for file in self.files]
         if len(names) != len(set(names)):
             raise ValueError("file names must be unique")
+        if self.archive_format == "file-set":
+            if any(file.source_path is None for file in self.files):
+                raise ValueError("file-set files require source_path")
+            if self.compressed_size_bytes != self.installed_size_bytes:
+                raise ValueError("file-set download size must equal installed size")
+            fingerprint = file_set_fingerprint(self.files)
+            if any(source.sha256 != fingerprint for source in self.sources):
+                raise ValueError("file-set source sha256 must equal its manifest fingerprint")
+        elif any(file.source_path is not None for file in self.files):
+            raise ValueError("source_path is only valid for file-set manifests")
         if self.redistribution == "upstream_only":
             for source in self.sources:
                 if source.kind != "upstream":

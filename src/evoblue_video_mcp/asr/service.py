@@ -46,6 +46,7 @@ _TIERS = {
     "zipformer-ctc-small-zh-int8": "lite",
     "sensevoice-small-int8": "standard",
     "whisper-cpp-base": "multilingual",
+    "qwen3-asr-0.6b-int8": "qwen3",
 }
 
 # Model id → provider id for the built-in catalog. Recommendations are only
@@ -57,6 +58,7 @@ _MODEL_PROVIDER_IDS = {
     "zipformer-ctc-small-zh-int8": "sherpa-onnx-lite",
     "sensevoice-small-int8": "sherpa-onnx-standard",
     "whisper-cpp-base": "whisper-cpp-base",
+    "qwen3-asr-0.6b-int8": "sherpa-onnx-qwen3",
 }
 
 

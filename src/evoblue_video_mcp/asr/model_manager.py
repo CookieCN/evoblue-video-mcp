@@ -276,6 +276,7 @@ def _stream_copy(
     hasher = hashlib.sha256()
     size = 0
     out_path = staging / name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as out:
         while True:
             chunk = src.read(_CHUNK)
@@ -308,6 +309,37 @@ def install_archive(
     staging = Path(tempfile.mkdtemp(prefix=f".{dest.name}.staging-", dir=dest.parent))
     try:
         _extract_and_verify(archive, staging, manifest)
+        _promote(staging, dest)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return str(dest)
+
+
+def install_file_set(
+    download_dir: str | Path, manifest: ModelManifest, dest_dir: str | Path
+) -> str:
+    """Verify and atomically promote a pinned set of individually downloaded files."""
+    if manifest.archive_format != "file-set":
+        raise ArchiveError("install_file_set requires a file-set manifest")
+    source = Path(download_dir)
+    dest = Path(dest_dir)
+    expected = {file.name: file for file in manifest.files}
+    actual = {
+        path.relative_to(source).as_posix()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    if actual != set(expected):
+        raise ArchiveError("downloaded file set does not match the manifest")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{dest.name}.staging-", dir=dest.parent))
+    budget = _Budget(manifest.installed_size_bytes)
+    try:
+        for name in sorted(expected):
+            with open(source / name, "rb") as src:
+                _stream_copy(src, name, staging, expected, budget)
         _promote(staging, dest)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)

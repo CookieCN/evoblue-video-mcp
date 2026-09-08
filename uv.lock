@@ -199,7 +199,7 @@ wheels = [
 
 [[package]]
 name = "evoblue-video-mcp"
-version = "0.9.0b1"
+version = "0.9.0b2"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -213,6 +213,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
     { name = "tenacity" },
+    { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "yt-dlp" },
 ]
@@ -254,6 +255,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2,<3" },
     { name = "structlog", specifier = ">=25,<26" },
     { name = "tenacity", specifier = ">=9,<10" },
+    { name = "typing-extensions", specifier = ">=4.6,<5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
     { name = "yt-dlp", specifier = ">=2025.1.26" },
 ]

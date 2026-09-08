@@ -16,7 +16,7 @@ from evoblue_video_mcp.asr import installer as installer_module
 from evoblue_video_mcp.asr import manifest as manifest_module
 from evoblue_video_mcp.asr.catalog import ApprovedSource
 from evoblue_video_mcp.asr.installer import NotReleasableError, _temp_path, install_model
-from evoblue_video_mcp.asr.manifest import ModelManifest
+from evoblue_video_mcp.asr.manifest import ModelFile, ModelManifest, file_set_fingerprint
 from evoblue_video_mcp.storage.model_download import ModelDownloadStatus
 from evoblue_video_mcp.storage.repository import (
     activate_installation,
@@ -137,6 +137,88 @@ async def test_install_completes_and_activates(
         active = await get_active_model(session, model_id="test-model")
         assert active is not None and active.active_version == "1.0"
     assert (tmp_path / "test-model" / "1.0" / "model.int8.onnx").read_bytes() == _MODEL
+
+
+async def test_file_set_downloads_nested_files_and_activates(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path, monkeypatch
+) -> None:
+    payloads = {
+        "/base/model/encoder.onnx": b"encoder",
+        "/base/tokenizer/vocab.json": b'{"token": 1}',
+    }
+    files = tuple(
+        ModelFile(
+            name=local,
+            source_path=remote.removeprefix("/base/"),
+            size_bytes=len(body),
+            sha256=_sha(body),
+        )
+        for (remote, body), local in zip(
+            payloads.items(), ("encoder.onnx", "tokenizer/vocab.json"), strict=True
+        )
+    )
+    fingerprint = file_set_fingerprint(files)
+    base_url = "https://modelscope.cn/base"
+    total = sum(len(body) for body in payloads.values())
+    manifest = ModelManifest.model_validate(
+        {
+            "model_id": "file-set-model",
+            "version": "1.0",
+            "provider": "p",
+            "languages": ["zh"],
+            "platforms": ["windows-x86_64"],
+            "compressed_size_bytes": total,
+            "installed_size_bytes": total,
+            "license": "Apache-2.0",
+            "attribution": "test",
+            "upstream_url": "https://example.com",
+            "redistribution": "mirror_approved",
+            "archive_format": "file-set",
+            "sources": [
+                {
+                    "url": base_url,
+                    "kind": "china-primary",
+                    "sha256": fingerprint,
+                    "size_bytes": total,
+                }
+            ],
+            "files": [file.model_dump() for file in files],
+        }
+    )
+    monkeypatch.setattr(
+        manifest_module,
+        "APPROVED_CATALOG",
+        {
+            (manifest.model_id, manifest.version): frozenset(
+                {
+                    ApprovedSource(
+                        url=base_url,
+                        kind="china-primary",
+                        sha256=fingerprint,
+                        size_bytes=total,
+                    )
+                }
+            )
+        },
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payloads[request.url.path])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with session_factory() as session:
+        op = await install_model(
+            session=session,
+            manifest=manifest,
+            http_client=client,
+            models_dir=tmp_path,
+        )
+    await client.aclose()
+
+    assert op.status == ModelDownloadStatus.COMPLETED.value
+    installed = tmp_path / "file-set-model" / "1.0"
+    assert (installed / "encoder.onnx").read_bytes() == b"encoder"
+    assert (installed / "tokenizer" / "vocab.json").read_bytes() == b'{"token": 1}'
 
 
 async def test_not_releasable_raises_without_operation(

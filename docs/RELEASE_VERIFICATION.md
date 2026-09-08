@@ -36,6 +36,8 @@ token 文件生成与 401/200 行为、损坏模型下 Engine 存活 + 稳定错
 - [ ] 校验失败场景：篡改下载（hosts 劫持模拟）→ 安装转 failed，无部分激活
 - [ ] 源不可达场景：屏蔽 GitHub → 任务保持 waiting/failed 并提示手动恢复，**不**隐式切换下载源
 - [ ] hf-mirror 可达性抽查（留证脚本 `scripts/qualify_china_sources.py`）
+- [ ] WebUI /models 安装 Qwen3-ASR：固定 ModelScope 提交返回 Range 206，中断后按文件续传，9 个文件逐一 SHA-256 通过后才激活
+- [ ] Qwen3-ASR 在最低规格目标机记录首次加载时间、RTF 与峰值内存；未形成证据前保持非正式默认
 
 ## 5. 升级 / 卸载
 

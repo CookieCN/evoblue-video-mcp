@@ -10,13 +10,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from evoblue_video_mcp.asr.manifest import ModelManifest
+from evoblue_video_mcp.asr.manifest import ModelFile, ModelManifest, file_set_fingerprint
 from evoblue_video_mcp.asr.model_manager import (
     ArchiveError,
     ContentRangeError,
     ResponseTooLargeError,
     download_resumable,
     install_archive,
+    install_file_set,
 )
 
 
@@ -432,3 +433,47 @@ def test_install_archive_rejects_existing_different_dir(tmp_path) -> None:
         install_archive(archive, manifest, dest)
     # The existing directory must never be deleted.
     assert (dest / "model.int8.onnx").read_bytes() == b"different-content"
+
+
+def test_install_file_set_rejects_tampered_or_extra_files(tmp_path) -> None:
+    expected = b"pinned-model"
+    file = ModelFile(
+        name="tokenizer/vocab.json",
+        source_path="tokenizer/vocab.json",
+        size_bytes=len(expected),
+        sha256=_sha(expected),
+    )
+    fingerprint = file_set_fingerprint((file,))
+    manifest = ModelManifest.model_validate(
+        {
+            "model_id": "file-set-model",
+            "version": "1",
+            "provider": "p",
+            "languages": ["zh"],
+            "platforms": ["windows-x86_64"],
+            "compressed_size_bytes": len(expected),
+            "installed_size_bytes": len(expected),
+            "license": "Apache-2.0",
+            "attribution": "test",
+            "upstream_url": "https://example.com",
+            "redistribution": "blocked",
+            "archive_format": "file-set",
+            "sources": [
+                {
+                    "url": "https://modelscope.cn/model/resolve/revision",
+                    "kind": "china-primary",
+                    "sha256": fingerprint,
+                    "size_bytes": len(expected),
+                }
+            ],
+            "files": [file.model_dump()],
+        }
+    )
+    source = tmp_path / "download"
+    (source / "tokenizer").mkdir(parents=True)
+    (source / "tokenizer" / "vocab.json").write_bytes(b"tampered-data")
+    (source / "unexpected.txt").write_bytes(b"extra")
+
+    with pytest.raises(ArchiveError):
+        install_file_set(source, manifest, tmp_path / "installed")
+    assert not (tmp_path / "installed").exists()

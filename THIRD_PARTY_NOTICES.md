@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-自 ASR-4 起，本文件随发布包分发（`scripts/build_package.py` 拷入 bundle 根目录）。以下为当前锁定（`uv.lock`，2026-08-28）的主要运行时依赖与许可证；传递依赖的完整清单以 `uv.lock` 为准。模型权重（SenseVoiceSmall、Zipformer CTC、Silero VAD、Whisper Base ggml）的许可证与署名清单见 [docs/ASR_MODEL_LICENSES.md](docs/ASR_MODEL_LICENSES.md)。
+自 ASR-4 起，本文件随发布包分发（`scripts/build_package.py` 拷入 bundle 根目录）。以下为当前锁定（`uv.lock`，2026-09-08）的主要运行时依赖与许可证；传递依赖的完整清单以 `uv.lock` 为准。模型权重（SenseVoiceSmall、Zipformer CTC、Qwen3-ASR、Silero VAD、Whisper Base ggml）的许可证与署名清单见 [docs/ASR_MODEL_LICENSES.md](docs/ASR_MODEL_LICENSES.md)。
 
 ## 随包运行时依赖（full 变体；base 变体不含 sherpa-onnx / onnxruntime / numpy）
 
@@ -27,7 +27,7 @@
 
 ## 随包分发的模型资产
 
-自 ASR-3 起，基础安装包随包附带且仅附带一个模型资产：Silero VAD（`src/evoblue_video_mcp/asr/assets/silero_vad.onnx`，SHA-256 `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6`）。它是 sherpa-onnx 两级识别模型的运行时依赖，按 MIT 许可证再分发，完整许可文本随包存放于 `src/evoblue_video_mcp/asr/assets/silero_vad.LICENSE`，全文如下。其余模型权重不随包分发。
+自 ASR-3 起，基础安装包随包附带且仅附带一个模型资产：Silero VAD（`src/evoblue_video_mcp/asr/assets/silero_vad.onnx`，SHA-256 `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6`）。它是 sherpa-onnx 本地识别模型的运行时依赖，按 MIT 许可证再分发，完整许可文本随包存放于 `src/evoblue_video_mcp/asr/assets/silero_vad.LICENSE`，全文如下。其余模型权重（包括 Qwen3-ASR）不随包分发。
 
 ### Silero VAD — MIT License
 

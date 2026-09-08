@@ -1,4 +1,4 @@
-"""sherpa-onnx ASR provider for the Lite Zipformer and Standard SenseVoice tiers.
+"""sherpa-onnx ASR provider for Zipformer, SenseVoice, and Qwen3-ASR tiers.
 
 This is the only module allowed to import ``sherpa_onnx``. It loads one model
 family per instance, segments long audio with the silero VAD, transcribes each
@@ -72,7 +72,7 @@ class SherpaModelSpec:
     """A sherpa-onnx model family and its on-disk artifacts."""
 
     provider_id: str
-    family: str  # "zipformer_ctc" | "sense_voice"
+    family: str  # "zipformer_ctc" | "sense_voice" | "qwen3_asr"
     model_id: str
     model_version: str
     model_path: str  # *.onnx
@@ -80,6 +80,10 @@ class SherpaModelSpec:
     languages: frozenset[str]
     num_threads: int = 1
     use_itn: bool = False
+    conv_frontend_path: str = ""
+    encoder_path: str = ""
+    decoder_path: str = ""
+    tokenizer_path: str = ""
 
 
 class SherpaOnnxProvider:
@@ -106,6 +110,18 @@ class SherpaOnnxProvider:
                 num_threads=spec.num_threads,
                 sample_rate=_SAMPLE_RATE,
                 use_itn=spec.use_itn,
+            )
+        if spec.family == "qwen3_asr":
+            factory = getattr(sherpa_onnx.OfflineRecognizer, "from_qwen3_asr", None)
+            if factory is None:
+                raise ImportError("sherpa-onnx>=1.12.34 is required for Qwen3-ASR")
+            return factory(
+                conv_frontend=spec.conv_frontend_path,
+                encoder=spec.encoder_path,
+                decoder=spec.decoder_path,
+                tokenizer=spec.tokenizer_path,
+                num_threads=spec.num_threads,
+                sample_rate=_SAMPLE_RATE,
             )
         raise ValueError(f"unknown sherpa-onnx family: {spec.family!r}")
 

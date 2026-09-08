@@ -418,6 +418,7 @@ function Settings() {
                 <option value="auto">自动</option>
                 <option value="sherpa-onnx-lite">Lite（明确选择，非正式默认推荐）</option>
                 <option value="sherpa-onnx-standard">Standard</option>
+                <option value="sherpa-onnx-qwen3">Qwen3-ASR 0.6B（可选，约 1 GB）</option>
                 <option value="whisper-cpp-base">Whisper.cpp Base</option>
               </select>
             </label>
@@ -484,6 +485,7 @@ function Models() {
   function tierLabel(m) {
     if (m.tier === "lite") return "Lite · 中文快速体验";
     if (m.tier === "multilingual") return "Whisper.cpp Base · 多语言回退";
+    if (m.tier === "qwen3") return "Qwen3-ASR 0.6B INT8 · 多语言增强";
     return "Standard · 中英日韩粤";
   }
 
@@ -600,7 +602,7 @@ function Models() {
               <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm text-slate-600">
                 <div className="flex gap-2">
                   <dt className="w-24 shrink-0 text-slate-500">语言</dt>
-                  <dd>{(m.languages ?? []).join(" / ")}</dd>
+                  <dd>{m.tier === "qwen3" ? "30 种语言 + 22 种中文方言" : (m.languages ?? []).join(" / ")}</dd>
                 </div>
                 <div className="flex gap-2">
                   <dt className="w-24 shrink-0 text-slate-500">下载体积</dt>
@@ -634,6 +636,11 @@ function Models() {
               {m.tier === "lite" && !m.formal_default && (
                 <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
                   未通过正式默认门禁（基准实体召回不足，精确制品许可证未确认）：可安装和明确选择，但当前不作为自动推荐。
+                </p>
+              )}
+              {m.tier === "qwen3" && !m.formal_default && (
+                <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                  国内从 ModelScope 下载。模型约占 941 MB，覆盖更多语言和中文方言；尚未通过 EvoBlue 基准，不作为自动下载或正式默认。
                 </p>
               )}
               {m.formal_default && (

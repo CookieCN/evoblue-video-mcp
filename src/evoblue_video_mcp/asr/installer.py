@@ -16,11 +16,13 @@ machine. It is crash-safe and idempotent:
 """
 
 import asyncio
+import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy.exc import IntegrityError
@@ -36,6 +38,7 @@ from evoblue_video_mcp.asr.model_manager import (
     _file_sha256,
     download_resumable,
     install_archive,
+    install_file_set,
 )
 from evoblue_video_mcp.storage.model_download import (
     TERMINAL_DOWNLOAD_STATUSES,
@@ -100,8 +103,60 @@ def _temp_path(model_id: str, version: str, models_root: Path) -> Path:
 
 
 def _truncate(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+        return
     with suppress(FileNotFoundError):
         path.unlink()
+
+
+def _file_set_temp_path(model_id: str, version: str, models_root: Path) -> Path:
+    return models_root / ".downloads" / model_id / f"{version}.files"
+
+
+def _file_set_downloaded_bytes(root: Path, manifest: ModelManifest) -> int:
+    total = 0
+    for file in manifest.files:
+        path = root / file.name
+        if path.is_file():
+            total += min(path.stat().st_size, file.size_bytes)
+    return total
+
+
+def _verify_file_set(root: Path, manifest: ModelManifest) -> None:
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+    expected = {file.name for file in manifest.files}
+    if actual != expected:
+        raise ArchiveError("downloaded file set does not match the manifest")
+    for file in manifest.files:
+        _verify_downloaded(root / file.name, file.size_bytes, file.sha256)
+
+
+async def _download_file_set(
+    *,
+    source_url: str,
+    root: Path,
+    manifest: ModelManifest,
+    http_client: httpx.AsyncClient,
+    progress: Callable[[int], Awaitable[None]],
+) -> None:
+    completed = 0
+    for file in manifest.files:
+        assert file.source_path is not None
+        target = root / file.name
+
+        async def file_progress(n: int, *, prefix: int = completed) -> None:
+            await progress(prefix + n)
+
+        await download_resumable(
+            f"{source_url.rstrip('/')}/{quote(file.source_path, safe='/')}",
+            target,
+            file.sha256,
+            file.size_bytes,
+            http_client,
+            progress=file_progress,
+        )
+        completed += file.size_bytes
 
 
 def _verify_downloaded(temp_path: Path, expected_size_bytes: int, expected_sha256: str) -> None:
@@ -264,7 +319,11 @@ async def _install_model_locked(
         now=now,
     )
     op_id = op.operation_id
-    temp_path = _temp_path(manifest.model_id, manifest.version, models_root)
+    temp_path = (
+        _file_set_temp_path(manifest.model_id, manifest.version, models_root)
+        if manifest.archive_format == "file-set"
+        else _temp_path(manifest.model_id, manifest.version, models_root)
+    )
 
     state = {"last_persisted": op.downloaded_bytes}
 
@@ -306,7 +365,11 @@ async def _install_model_locked(
             status = ModelDownloadStatus.DOWNLOADING
 
         if status is ModelDownloadStatus.DOWNLOADING:
-            actual = temp_path.stat().st_size if temp_path.exists() else 0
+            actual = (
+                _file_set_downloaded_bytes(temp_path, manifest)
+                if manifest.archive_format == "file-set"
+                else (temp_path.stat().st_size if temp_path.exists() else 0)
+            )
             if actual > expected_size:
                 # Oversized / corrupt partial: cannot be trusted.
                 _truncate(temp_path)
@@ -330,18 +393,34 @@ async def _install_model_locked(
             outcome: DownloadOutcome | None = None
             for index, source in enumerate(manifest.sources):
                 try:
-                    outcome = await download_resumable(
-                        source.url,
-                        temp_path,
-                        source.sha256,
-                        source.size_bytes,
-                        http_client,
-                        progress=persist_progress,
-                        on_restart=on_restart,
-                        on_headers=on_headers,
-                        etag=op.etag,
-                        last_modified=op.last_modified,
-                    )
+                    if manifest.archive_format == "file-set":
+                        await _download_file_set(
+                            source_url=source.url,
+                            root=temp_path,
+                            manifest=manifest,
+                            http_client=http_client,
+                            progress=persist_progress,
+                        )
+                        outcome = DownloadOutcome(
+                            downloaded_bytes=expected_size,
+                            sha256=expected_sha256,
+                            restarted=False,
+                            etag=None,
+                            last_modified=None,
+                        )
+                    else:
+                        outcome = await download_resumable(
+                            source.url,
+                            temp_path,
+                            source.sha256,
+                            source.size_bytes,
+                            http_client,
+                            progress=persist_progress,
+                            on_restart=on_restart,
+                            on_headers=on_headers,
+                            etag=op.etag,
+                            last_modified=op.last_modified,
+                        )
                     break
                 except (DownloadError, httpx.HTTPError):
                     if index + 1 >= len(manifest.sources):
@@ -374,7 +453,10 @@ async def _install_model_locked(
             status = ModelDownloadStatus.VERIFYING
 
         if status is ModelDownloadStatus.VERIFYING:
-            _verify_downloaded(temp_path, expected_size, expected_sha256)
+            if manifest.archive_format == "file-set":
+                _verify_file_set(temp_path, manifest)
+            else:
+                _verify_downloaded(temp_path, expected_size, expected_sha256)
             op = await advance_download_operation(
                 session,
                 operation_id=op_id,
@@ -385,7 +467,11 @@ async def _install_model_locked(
 
         if status is ModelDownloadStatus.INSTALLING:
             version_dir = models_root / manifest.model_id / manifest.version
-            installed_path = install_archive(temp_path, manifest, version_dir)
+            installed_path = (
+                install_file_set(temp_path, manifest, version_dir)
+                if manifest.archive_format == "file-set"
+                else install_archive(temp_path, manifest, version_dir)
+            )
             op = await complete_installation(
                 session,
                 operation_id=op_id,
@@ -399,7 +485,11 @@ async def _install_model_locked(
     except _Cancelled:
         current = await get_download_operation(session, operation_id=op_id)
         if current is not None and current.status == ModelDownloadStatus.DOWNLOADING.value:
-            actual = temp_path.stat().st_size if temp_path.exists() else 0
+            actual = (
+                _file_set_downloaded_bytes(temp_path, manifest)
+                if manifest.archive_format == "file-set"
+                else (temp_path.stat().st_size if temp_path.exists() else 0)
+            )
             await update_download_progress(
                 session, operation_id=op_id, downloaded_bytes=actual, now=now()
             )

@@ -1,16 +1,43 @@
 # ASR China Download-Source Qualification
 
-Status: **machinery delivered, no mirror shipped**  
+Status: **Qwen3-ASR domestic source shipped; legacy tiers remain upstream-only**
 Decision date: 2026-08-27  
 Owner: Wilson Gu (product decision recorded; implementer built machinery + evidence)
 
 ## Decision
 
+### 2026-09-08 amendment — Qwen3-ASR
+
+Qwen3-ASR 0.6B INT8 新增为可选模型，使用 ModelScope 国内路径直接安装。它不是
+Alibaba 官方原始 Transformers 权重，而是供 sherpa-onnx 使用的 ONNX INT8 导出；
+EvoBlue 固定到导出仓库提交
+`9c182309f7bb075f241424441add9e16c5086dfb`，逐文件钉死体积与 SHA-256，并以
+`file-set` 合同下载、校验、原子激活。来源标记为 `mirror_approved/china-primary`，
+不是未经校验的运行时自动下载。
+
+2026-09-08 对最大权重文件 `encoder.int8.onnx` 的固定提交 URL 实测返回 HTTP 206：
+`Content-Range: bytes 0-0/182491662`。因此国内路径支持 Range 断点续传；完整文件集
+总下载/安装体积为 987,023,031 bytes（约 941 MiB）。模型管理页在用户同意前显示
+此成本，基础安装包仍不携带任何 Qwen 权重。
+
+Qwen3-ASR 当前是“可安装、可明确选择、已安装时可复用”的增强选项，不是正式默认。
+在 EvoBlue 冻结语料、最低规格 Windows 机器和真实大陆网络完成独立门禁前，自动推荐
+仍保持 Standard SenseVoice（中文/中英等）或 Whisper（覆盖外语言）。
+
+证据：
+
+- Alibaba Qwen 官方仓库：https://github.com/QwenLM/Qwen3-ASR
+- sherpa-onnx Qwen3-ASR 模型/运行说明：https://k2-fsa.github.io/sherpa/onnx/qwen3-asr/pretrained.html
+- 固定 ONNX 导出来源：https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx
+
+### 2026-08-27 legacy-tier decision
+
 ASR-2 第三步的「中国下载源资格验证」按「**器械 + 留证，暂不落镜像**」交付：
 
 - 实现了 Manifest 多源回退（`installer` 按 `sources` 顺序下载，某源失败自动切换下一源，清掉源专属 ETag/Last-Modified、保留共享 SHA 的 partial 续传）。
 - Lite Zipformer 进入 `APPROVED_CATALOG`（`upstream_only`，仅钉 GitHub 原始发布 URL）。
-- 两个生产 Manifest 均保持 `redistribution="upstream_only"`，**不 ship 任何 `mirror_approved` 源**。
+- 当时两个生产 Manifest 均保持 `redistribution="upstream_only"`；此历史结论仅适用于
+  SenseVoice 与 Zipformer，不适用于上面的 Qwen3 新增项。
 - 本文件留证「为什么现在不能落镜像」以及「将来要落镜像需要补什么」。
 
 `is_releasable` 继续 fail-closed：没有 catalog 审批的源、没有充分使用条款的制品，一律不能进生产清单。

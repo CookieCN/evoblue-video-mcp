@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from evoblue_video_mcp.asr.approvals import is_formal_default
 from evoblue_video_mcp.asr.base import ASRError, ASRRequest, ASRSegment, segment_key
 from evoblue_video_mcp.asr.registry import get_provider, list_providers
-from evoblue_video_mcp.asr.routing import ProviderOption, route_asr
+from evoblue_video_mcp.asr.routing import QWEN3_LANGUAGES, ProviderOption, route_asr
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.llm.base import LLMError, LLMProvider
 from evoblue_video_mcp.platforms.base import SUBTITLE_MISSING, AdapterError, PlatformAdapter
@@ -416,6 +416,18 @@ async def _provider_options(session: AsyncSession) -> tuple[ProviderOption, ...]
                 and "sensevoice-small-int8" in installed_models
             ),
             formal_default=is_formal_default("sensevoice-small-int8", "2024-07-17"),
+        ),
+        ProviderOption(
+            provider_id="sherpa-onnx-qwen3",
+            model_id="qwen3-asr-0.6b-int8",
+            model_version="2026-03-25",
+            tier="qwen3",
+            languages=QWEN3_LANGUAGES,
+            installed=(
+                "sherpa-onnx-qwen3" in installed_ids
+                and "qwen3-asr-0.6b-int8" in installed_models
+            ),
+            formal_default=is_formal_default("qwen3-asr-0.6b-int8", "2026-03-25"),
         ),
         ProviderOption(
             provider_id="whisper-cpp-base",

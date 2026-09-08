@@ -1,6 +1,6 @@
 {
   "project": "EvoBlue Video MCP",
-  "updated": "2026-09-07",
+  "updated": "2026-09-08",
   "modules": {
     "p0_foundation": {
       "name": "P0 Harness, contracts, and skeleton",
@@ -237,6 +237,11 @@
           "id": "ASR-4",
           "name": "Packaging, license, benchmark, and release hardening",
           "status": "done"
+        },
+        {
+          "id": "ASR-5",
+          "name": "Optional Qwen3-ASR 0.6B INT8 with pinned ModelScope China file-set delivery",
+          "status": "done"
         }
       ]
     },
@@ -368,7 +373,7 @@
     }
   },
   "summary": {
-    "done": 61,
+    "done": 62,
     "in_progress": 0,
     "planned": 0,
     "completion_pct": 100.0

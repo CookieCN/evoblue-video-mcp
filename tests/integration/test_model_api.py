@@ -38,12 +38,13 @@ async def test_models_list(
     items = resp.json()["items"]
     assert {item["model_id"] for item in items} == {
         "sensevoice-small-int8",
+        "qwen3-asr-0.6b-int8",
         "whisper-cpp-base",
         "zipformer-ctc-small-zh-int8",
     }
     for item in items:
-        assert item["tier"] in {"lite", "standard", "multilingual"}
-        assert item["redistribution"] == "upstream_only"
+        assert item["tier"] in {"lite", "standard", "qwen3", "multilingual"}
+        assert item["redistribution"] in {"upstream_only", "mirror_approved"}
         assert item["compressed_size_bytes"] > 0
         assert item["installed_size_bytes"] > 0
         assert item["installed"] is False

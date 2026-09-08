@@ -18,6 +18,20 @@ class ApprovedSource:
 
 
 APPROVED_CATALOG: dict[tuple[str, str], frozenset[ApprovedSource]] = {
+    ("qwen3-asr-0.6b-int8", "2026-03-25"): frozenset(
+        {
+            ApprovedSource(
+                url=(
+                    "https://modelscope.cn/models/zengshuishui/"
+                    "Qwen3-ASR-onnx/resolve/"
+                    "9c182309f7bb075f241424441add9e16c5086dfb"
+                ),
+                kind="china-primary",
+                sha256="ae2850217177b453be842cc12fd1bbde0e2fb93c369ff877e71e92e03aa6b8ac",
+                size_bytes=987023031,
+            )
+        }
+    ),
     ("sensevoice-small-int8", "2024-07-17"): frozenset(
         {
             ApprovedSource(

@@ -1,4 +1,3 @@
 """EvoBlue Video MCP local engine package."""
 
-__version__ = "0.9.0b1"
-
+__version__ = "0.9.0b2"

@@ -223,3 +223,71 @@ def test_sherpa_registers_when_vad_ok_and_files_present(tmp_path, monkeypatch) -
 
     register_available_asr_providers(tmp_path / "models")
     assert get_provider("sherpa-onnx-standard") is built
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("sherpa_onnx") is None, reason="sherpa-onnx not installed"
+)
+def test_qwen3_registers_from_complete_file_set(tmp_path, monkeypatch) -> None:
+    tier = tmp_path / "models" / "qwen3-asr-0.6b-int8" / "2026-03-25"
+    (tier / "tokenizer").mkdir(parents=True)
+    for relative in (
+        "conv_frontend.onnx",
+        "encoder.int8.onnx",
+        "decoder.int8.onnx",
+        "tokenizer/vocab.json",
+        "tokenizer/merges.txt",
+        "tokenizer/tokenizer_config.json",
+    ):
+        (tier / relative).write_bytes(b"stub")
+
+    built = FakeASRProvider(model_id="qwen3-asr-0.6b-int8")
+    built.provider_id = "sherpa-onnx-qwen3"
+    monkeypatch.setattr(
+        "evoblue_video_mcp.asr.registration._build_sherpa", lambda **kwargs: built
+    )
+    register_available_asr_providers(tmp_path / "models")
+    assert get_provider("sherpa-onnx-qwen3") is built
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("sherpa_onnx") is None, reason="sherpa-onnx not installed"
+)
+def test_qwen3_provider_uses_native_sherpa_factory(monkeypatch) -> None:
+    from evoblue_video_mcp.asr.providers import sherpa_onnx as provider_module
+
+    captured: dict[str, object] = {}
+
+    def fake_factory(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        provider_module.sherpa_onnx.OfflineRecognizer,
+        "from_qwen3_asr",
+        staticmethod(fake_factory),
+    )
+    spec = provider_module.SherpaModelSpec(
+        provider_id="sherpa-onnx-qwen3",
+        family="qwen3_asr",
+        model_id="qwen3-asr-0.6b-int8",
+        model_version="2026-03-25",
+        model_path="",
+        tokens_path="",
+        languages=frozenset({"zh", "en"}),
+        conv_frontend_path="conv_frontend.onnx",
+        encoder_path="encoder.int8.onnx",
+        decoder_path="decoder.int8.onnx",
+        tokenizer_path="tokenizer",
+    )
+
+    provider_module.SherpaOnnxProvider(spec, vad_model_path="silero_vad.onnx")
+
+    assert captured == {
+        "conv_frontend": "conv_frontend.onnx",
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "tokenizer": "tokenizer",
+        "num_threads": 1,
+        "sample_rate": 16000,
+    }

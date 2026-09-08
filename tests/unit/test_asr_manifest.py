@@ -8,7 +8,9 @@ from pydantic import ValidationError
 
 from evoblue_video_mcp.asr.manifest import (
     ManifestValidationError,
+    ModelFile,
     ModelManifest,
+    file_set_fingerprint,
     is_releasable,
     load_manifest,
 )
@@ -144,6 +146,47 @@ def test_duplicate_file_names_rejected() -> None:
     data["files"].append(
         {"name": "model.int8.onnx", "size_bytes": 100, "sha256": "e" * 64}
     )
+    with pytest.raises(ValidationError):
+        ModelManifest.model_validate(data)
+
+
+def test_file_set_requires_safe_source_paths_and_pinned_fingerprint() -> None:
+    files = [
+        ModelFile(
+            name="model/encoder.int8.onnx",
+            source_path="model_0.6B/encoder.int8.onnx",
+            size_bytes=3,
+            sha256="a" * 64,
+        )
+    ]
+    fingerprint = file_set_fingerprint(tuple(files))
+    data = _valid_manifest()
+    data.update(
+        {
+            "compressed_size_bytes": 3,
+            "installed_size_bytes": 3,
+            "redistribution": "mirror_approved",
+            "archive_format": "file-set",
+            "sources": [
+                {
+                    "url": "https://modelscope.cn/models/example/model/resolve/revision",
+                    "kind": "china-primary",
+                    "sha256": fingerprint,
+                    "size_bytes": 3,
+                }
+            ],
+            "files": [file.model_dump() for file in files],
+        }
+    )
+    manifest = ModelManifest.model_validate(data)
+    assert manifest.files[0].name == "model/encoder.int8.onnx"
+
+    data["sources"][0]["sha256"] = "b" * 64
+    with pytest.raises(ValidationError):
+        ModelManifest.model_validate(data)
+
+    data["sources"][0]["sha256"] = fingerprint
+    data["files"][0]["source_path"] = "../encoder.onnx"
     with pytest.raises(ValidationError):
         ModelManifest.model_validate(data)
 

@@ -17,7 +17,7 @@
 - P1～P4 已完成：SQLite Job、版本化迁移、状态转换、单 Worker 租约、崩溃恢复、YouTube/Bilibili 字幕分析闭环、Markdown/FTS5/索引重建，以及七工具 STDIO MCP Bridge。
 - P4 客户端实测：Claude Code 已完成工具调用；Codex 0.153.4 持久配置已由真实用户态读取并完成 `diagnose_environment` / `list_analysis_jobs`；WorkBuddy 已完成真实握手、七工具发现与提交/状态工具级实测（报告列被 Engine 未完成初始设置阻断，任务按设计停在 queued）；DeepSeek 保持未验证。
 - P6/ASR 已完成：Standard SenseVoiceSmall INT8 通过基准并成为唯一正式默认；Lite 未过审、不自动推荐；模型管理、路由恢复、许可与打包门禁均已收口。
-- 当前阶段为 P5：WebUI MCP 自动配置与真实握手。
+- P5、P7、P8 与 ASR-5 均已交付；当前版本为 0.9.0b2，重新构建安装包后即可给外部用户验证 Qwen3 选项。
 - 详细状态以 `.agents/progress.md` 和 `.agents/feature_list.json` 为准。
 
 ## ASR direction
@@ -27,6 +27,7 @@
 - 中文模型分两级：约 63.4 MB 的离线 Zipformer CTC small INT8 是 Lite 首体验候选；约 228 MB 的 INT8-only SenseVoiceSmall 是 Standard 候选。两者只有通过对应基准、许可证审查和中国下载验证后才能成为正式推荐。
 - 禁止使用同时携带约 894 MB FP32 与约 228 MB INT8 的 SenseVoice 完整制品；生产 Manifest 只能安装实际需要的权重。
 - 其他语言由可选 `whisper.cpp` 模型包回退；faster-whisper 仅保留为高级可选能力，不得拖大基础安装包。
+- 可选 Qwen3-ASR 0.6B INT8 复用 sherpa-onnx，覆盖 30 种语言与 22 种中文方言；约 941 MiB 文件集从固定 ModelScope 国内提交下载，逐文件校验并支持续传。它尚未通过 EvoBlue 独立基准，不替代 Standard 正式默认。
 - ASR 路由不触发隐式下载：缺模型任务持久化为 `waiting_for_model`，WebUI 经用户同意安装后由正常 Worker 恢复。应用设置可固定 Provider；已固定路由写入 Job，升级不会改写既有任务选择。
 - `whisper-cpp-base` 钉死 147,951,465-byte ggml Base 制品；模型由 Model Manager 管理，`whisper-cli` 由用户显式配置，基础安装包不携带二进制。
 - Model Manager 由 Local Engine 统一负责按需下载、断点续传、SHA-256、安全解压、原子安装、升级回滚和卸载。

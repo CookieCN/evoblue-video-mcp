@@ -17,7 +17,7 @@ push。
 
 ## 1. 版本与产物命名（冻结）
 
-- 唯一版本源：`pyproject.toml` 的 PEP 440 版本（当前 `0.9.0b1`）。
+- 唯一版本源：`pyproject.toml` 的 PEP 440 版本（当前 `0.9.0b2`）。
   `src/evoblue_video_mcp/__init__.py` 的 `__version__` 必须与之相等；
   `frontend/package.json` 用 npm 形态（`-beta.N` ↔ PEP 440 `bN`）。禁止第三处
   字面量；派生字符串一律从 pyproject 推导。

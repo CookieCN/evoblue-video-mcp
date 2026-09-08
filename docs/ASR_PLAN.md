@@ -1,6 +1,6 @@
 # EvoBlue ASR Development Plan
 
-Status: in progress  
+Status: delivered; amended 2026-09-08 for optional Qwen3-ASR
 Decision date: 2026-08-26  
 Owner intent: reduce the default package size and make first-time model installation reliable for users in China without weakening local-first privacy.
 
@@ -13,8 +13,9 @@ The planned ASR stack is:
 1. Platform subtitles remain the first choice. ASR is entered only when usable subtitles are unavailable.
 2. Chinese-first onboarding uses two independently installable sherpa-onnx model tiers: a small Zipformer CTC INT8 model is the Lite candidate, and SenseVoiceSmall INT8 is the Standard candidate.
 3. `whisper.cpp` is the optional multilingual compatibility provider for languages outside the selected sherpa-onnx model's coverage.
-4. `faster-whisper` may remain an optional advanced provider, but it must not increase the base installer size.
-5. Cloud ASR is an optional BYOK provider and must never be silently selected or required for the local workflow.
+4. Qwen3-ASR 0.6B INT8 is an optional sherpa-onnx multilingual/dialect enhancement. It is installed from a pinned ModelScope file set for mainland users, but remains non-default until its independent release gate passes.
+5. `faster-whisper` may remain an optional advanced provider, but it must not increase the base installer size.
+6. Cloud ASR is an optional BYOK provider and must never be silently selected or required for the local workflow.
 
 This is a product architecture decision, not final recognition-quality approval. The default provider can change only after the benchmark gate in section 7 is completed.
 
@@ -29,6 +30,7 @@ Planning figures to recheck and pin during implementation:
 | sherpa-onnx Zipformer CTC small INT8 (offline, 2025-07-16) | 63.4 MB repository total; 62.7 MB ONNX | Chinese only | Lite first-experience candidate |
 | sherpa-onnx Zipformer CTC small INT8 (streaming, 2025-04-01) | approximately 25 MB ONNX | Chinese only | benchmark challenger, not a second automatic download |
 | SenseVoiceSmall INT8 for sherpa-onnx | approximately 228 MB ONNX | Chinese, English, Japanese, Korean, Cantonese | Standard Chinese-first/mixed-language candidate |
+| Qwen3-ASR 0.6B INT8 for sherpa-onnx | 987,023,031 bytes file set | 30 languages + 22 Chinese dialects | optional multilingual/dialect enhancement; non-default |
 | whisper.cpp base | 142 MiB model | multilingual | lightweight compatibility pack |
 | whisper.cpp small | 466 MiB model | multilingual | optional quality pack |
 | faster-whisper | model plus CTranslate2/native dependencies | multilingual | optional advanced provider only |
@@ -43,8 +45,9 @@ The previous 1.05 GB observation came from the full SenseVoice archive, which co
 - WebUI shows model purpose, languages, download size, installed size and disk location before consent.
 - Download progress, pause, resume, retry, cancellation, checksum verification and uninstall are visible.
 - After atomic installation, waiting jobs may resume through normal Worker recovery.
-- Chinese-only users are first offered Lite, with the size/quality tradeoff stated plainly. They can upgrade to Standard without losing jobs or reports.
+- Chinese and SenseVoice-covered users are first offered the formally approved Standard model; Lite remains explicitly installable but is not recommended after failing its gate.
 - Mixed Chinese-English, Cantonese, Japanese or Korean inputs are offered Standard directly; languages outside its coverage are offered an optional whisper.cpp pack.
+- Qwen3-ASR appears as an explicit approximately 941 MiB option. Installing it never changes old jobs; when present, automatic routing may reuse it for declared supported languages, but it is not a first-download recommendation.
 - Unknown language does not trigger multiple large downloads automatically.
 - A model upgrade is explicit and never downloads Lite and Standard together unless the user chooses to keep both.
 
@@ -276,6 +279,9 @@ Failure policy:
 - https://github.com/k2-fsa/sherpa-onnx/blob/master/docs/source/onnx/sense-voice/pretrained.rst
 - https://github.com/k2-fsa/sherpa/blob/master/docs/source/onnx/sense-voice/python-api.rst
 - https://github.com/ggml-org/whisper.cpp/blob/master/models/README.md
+- https://github.com/QwenLM/Qwen3-ASR
+- https://k2-fsa.github.io/sherpa/onnx/qwen3-asr/pretrained.html
+- https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx
 - https://github.com/FunAudioLLM/SenseVoice/issues/286
 
 Versions, URLs and licenses can change. The implementation agent must revalidate them before pinning a release manifest.
