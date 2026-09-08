@@ -4,7 +4,7 @@
 
 ### Added
 
-- Release 版本升级到 `0.9.0b5` / `0.9.0-beta.5`；卸载数据确认和完成提示从不可被 `/SUPPRESSMSGBOXES` 抑制的普通 `MsgBox` 改为 `SuppressibleMsgBox`，静默卸载默认返回 `IDNO` 保留用户数据，交互卸载体验不变；新增合同漂移测试。
+- Release 版本升级到 `0.9.0b5` / `0.9.0-beta.5`；卸载数据确认和完成提示从不可被 `/SUPPRESSMSGBOXES` 抑制的普通 `MsgBox` 改为 `SuppressibleMsgBox`，静默卸载默认返回 `IDNO` 保留用户数据，交互卸载体验不变；新增合同漂移测试。GitHub Release Run `34215508353` 的三平台构建、Windows 真实安装/鉴权/静默卸载与草稿 Release 全部成功。
 - Release 版本升级到 `0.9.0b4` / `0.9.0-beta.4`；Windows smoke 在强停 Engine 后等待进程退出，静默卸载改为 60 秒硬超时并轮询安装目录移除，防止 runner 在卸载步骤无限挂住。
 - Release 版本升级到 `0.9.0b3` / `0.9.0-beta.3`；修复 GitHub Windows smoke 以 `Exception.Response.StatusCode` 精确判断 401，避免 PowerShell 错误文本格式变化把正确鉴权误报为失败。beta.2 的同 runner `verify_release.py` 已先证明引擎实际返回 401。
 - Release 版本升级到 `0.9.0b2` / `0.9.0-beta.2`，用于区分包含 Qwen3-ASR 国内安装选项的新安装包与已发布的 beta.1 产物；Windows setup/portable zip 已构建并通过发行验证，校验和回算一致。
