@@ -94,6 +94,11 @@ jobs:
             }
             if (-not $unauth) { throw "models answered without a token" }
             Invoke-RestMethod -Uri "http://127.0.0.1:8899/api/models" -Headers @{ "X-Local-Token" = $token } -TimeoutSec 3 | Out-Null
+          } catch {
+            if (Test-Path "$env:RUNNER_TEMP/engine-err.log") {
+              Get-Content "$env:RUNNER_TEMP/engine-err.log" | Select-Object -Last 40
+            }
+            throw
           } finally {
             if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }

@@ -15,7 +15,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-      - run: uv sync --extra dev
+      # the asr extra mirrors the dev machine: without numpy/sherpa/onnxruntime
+      # mypy cannot resolve the provider imports and reports 6 phantom errors
+      - run: uv sync --extra dev --extra asr
       - run: uv run ruff check .
       - run: uv run mypy src
       # the dev machines are Windows: guard the win32 typing view too

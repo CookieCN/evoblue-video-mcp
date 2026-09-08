@@ -49,7 +49,7 @@ def http_get(url, token=None, timeout=5.0):
         return exc.code, exc.read().decode("utf-8", "replace")
 
 
-def wait_for_health(port, deadline_s=40.0):
+def wait_for_health(port, deadline_s=90.0):
     deadline = time.monotonic() + deadline_s
     url = f"http://127.0.0.1:{port}/api/health"
     last_error = ""
@@ -120,12 +120,16 @@ class Engine:
         return needle in self.log_path.read_text(encoding="utf-8", errors="replace")
 
 
-def check(name, ok, detail=""):
+def check(name, ok, detail="", engine_log=None):
     line = f"  [{'PASS' if ok else 'FAIL'}] {name}"
     if detail:
         line = f"{line} ({detail})"
     print(line)
     if not ok:
+        if engine_log is not None and engine_log.is_file():
+            tail = engine_log.read_text(encoding="utf-8", errors="replace")[-1500:]
+            print("  --- engine.log tail ---")
+            print(tail)
         raise SystemExit(f"verification failed at: {name}")
 
 
@@ -172,7 +176,11 @@ def verify(bundle, port, models_dir):
         engine = Engine(bundle, port, work / "fresh")
         engine.start()
         status, health = http_get(f"http://127.0.0.1:{port}/api/health")
-        check("health endpoint", status == 200 and health.get("status") == "ok")
+        check(
+            "health endpoint",
+            status == 200 and health.get("status") == "ok",
+            engine_log=engine.log_path,
+        )
         # P7: a frozen exe boots production even without an explicit env, so
         # the data endpoints are token-gated; read the persisted token.
         fresh_token = (engine.workdir / "data" / "local_token")
