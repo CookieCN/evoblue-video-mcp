@@ -334,3 +334,5 @@ worker 的 mark_failure/advance_job 用 Core UPDATE（CAS on lease），不 flus
 48. 给某个视图加了严格校验后，**检查同族入口是否都盖住了**——第五轮只修默认视图，显式状态视图仍宽松默认，第六轮同样问题再犯一次才补齐三源共用边界。同类教训：单点不变量（如 total）往往被多重检查冗余锁定，翻转验证时只翻一处可能不转红，要用测试期望的具体反例（如状态归属）验证翻转是否真的命中目标检查。
 
 49. 「严格验证」若靠 `str(raw[...])`/`int(raw[...])` 投影实现，其实是在**替对端修数据**——数字 job_id、布尔 progress、列表 title 都被静默改写成合法值。正确形态是 wire 层 Pydantic strict 模型（镜像对端 REST schema、extra=ignore 容忍未来字段）验证后再投影，且投影层自身越界（如 REST 无上限但 MCP 有 le=100 的字段）也要包进同一降级边界。另两条实测坑：①Python `True == 1`，等值回显比较必须显式拒绝 bool；②畸形夹具必须「其余字段完全合法、只变被测字段」，否则夹具在上游检查提前失败，测试注释声称的路径根本没执行（七轮评审 R16）。
+
+50. 带平台标记的依赖（`sys_platform`/`platform_system` marker）在做 PyInstaller `copy_metadata`/hiddenimports 这类「枚举构建环境内容」的操作时会咬人：Windows 上存在的包在 Linux/macOS 构建机可能根本不安装（如 sherpa-onnx 自带运行时、onnxruntime 仅 win32 声明）。对这类包一律「存在才复制」（`importlib.metadata.distribution` 探测）而不是无条件枚举——本地只验证得到一个平台，另两个平台的失败只在 CI 显形。另：被文件锁打断的 uv sync 会留下半损坏的 .venv（mypy 的 mypyc 扩展、cryptography 链丢失，表现为 INTERNAL ERROR / ModuleNotFoundError），处置 = 按包清除 site-packages 残目录后 `--reinstall`，并先杀掉引用 .venv 的残留 python 进程（本会话 5 个挂着的 bridge 测试进程正是锁源）。

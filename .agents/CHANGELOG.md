@@ -2,6 +2,8 @@
 
 ## [0.9.0-beta.6] — 2026-09-14
 
+### Fixed
+- 打包 spec 的 `copy_metadata("onnxruntime")` 按构建环境存在性守卫：onnxruntime 是 Windows 专属声明依赖，无守卫复制在 Linux/macOS 构建机上抛 PackagingError 并失败其 full 构建（首推 tag 时实测）；守卫后三平台构建全绿。
 首位试用者反馈修复包发布：16 项反馈（14 修复 + 1 符合合同 + 1 延期 ZCode 适配）、八轮评审加固全部通过（反例翻转验证）、真实闭环与从零下载验收。**B 站公开 CC 字幕样本按 Owner 决定豁免**（B 站字幕多为内嵌硬字幕，公开 CC 不代表实际路径；无字幕 ASR 链路已端到端验证）。提交 `e7e3803`。
 
 ## [Unreleased]

@@ -506,3 +506,18 @@ P2、闭环断言补强与状态同步要求）。上轮 R2/R3 修复本轮确�
   代表真实用户的实际路径；无字幕场景由 ASR 回退链路覆盖，该链路已在
   CLOSED LOOP 14/14 中端到端验证（B 站真实样本：字幕登录墙 → ASR → LLM →
   Markdown → FTS → bridge）。
+
+## 2026-09-14 发布执行（0.9.0-beta.6）
+
+- bump（pyproject/__init__/package.json+lockfile/tag 门禁字面量）→ 提交 `bef90bb` → push →
+  tag `v0.9.0-beta.6` 首推 → release 工作流 **Linux/macOS full 构建失败**（build-linux/
+  build-macos 的 `build_package.py --variants full` 步骤；Windows 全绿；draft-release 跳过）。
+- 根因：spec 无守卫的 `copy_metadata("onnxruntime")`——pyproject 中 onnxruntime 带
+  `sys_platform == 'win32'` 标记，Linux/macOS 构建机不安装该包，PyInstaller 的
+  copy_metadata 抛 PackagingError。对照证据：package 工作流在旧提交（无此 spec 改动）
+  三平台全绿、在新提交仅 mac/linux 失败。
+- 修复 `41a0511`：spec 改 `_copy_metadata_if_present`（importlib.metadata 探测后复制）；
+  本地 full 重建 133.7 MB 通过；tag 删除重打至 `41a0511` 再推。
+- 结果：release/package 工作流三平台全绿，**草稿 Release 已生成**（待 Owner 审阅发布）。
+- 遗留登记：CI 工作流 main 自 2026-09-07 持续红（先于本周期；ubuntu mypy 步骤；本地
+  mypy 1.20.2 三平台视图 --no-incremental 全绿不可复现、无日志权限）——独立后续项。
