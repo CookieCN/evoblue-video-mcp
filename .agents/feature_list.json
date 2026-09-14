@@ -407,16 +407,16 @@
         },
         {
           "id": "FF-6",
-          "name": "F6 fix-package release gate (closed loop + from-zero download OK; review rounds 1-7 fixed with counterexample flips incl. versioned credential slots, verdict-aware pointer compensation, one-snapshot unified list endpoint, shared strict wire-level validation & segment-position invariants; remaining external gap: Bilibili public-CC sample needs cookie env)",
-          "status": "in_progress"
+          "name": "F6 fix-package release gate — closed (2026-09-14): closed loops + from-zero download + 8 review rounds fixed with counterexample flips. Bilibili public-CC sample WAIVED by owner: Bilibili subtitles are typically hard-burned into the video, so the ASR path (already verified end-to-end) is the realistic no-subtitle scenario.",
+          "status": "done"
         }
       ]
     }
   },
   "summary": {
-    "done": 68,
-    "in_progress": 1,
+    "done": 69,
+    "in_progress": 0,
     "planned": 0,
-    "completion_pct": 98.6
+    "completion_pct": 100.0
   }
 }
