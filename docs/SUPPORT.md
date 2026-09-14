@@ -13,9 +13,11 @@
 | 启动后窗口一闪而过 / 无浏览器弹出 | 端口被占用，或自动打开浏览器被禁用 | 看命令行 stderr：退出码 3 = 已有实例在运行（直接用已运行实例）；退出码 4 = 端口被占，设置环境变量 `EVOBLUE_OPEN_UI=0` 可关自动开浏览器 |
 | WebUI 打开要求「粘贴本机访问令牌」 | 浏览器没有本机令牌（清过浏览器数据 / 换了浏览器 / 手动输入地址） | 打开数据目录（默认 `%LOCALAPPDATA%\EvoBlue\EvoBlue Video MCP`），用记事本打开 `local_token` 文件，全选复制粘贴进门页 |
 | 首页提示「有任务在排队但不会开始」 | 初始设置未完成（LLM 配置或 Key 缺失） | 到「设置」页完成初始设置；完成后排队任务自动开始 |
+| 需要查看运行日志（任务失败 / 模型安装失败排查） | 后台启动时看不到控制台输出 | 打开数据目录 `logs\engine.log`（默认 `%LOCALAPPDATA%\EvoBlue\EvoBlue Video MCP\logs\engine.log`）；滚动保留约 8 MB；日志已脱敏，可直接附给 issue |
 | 提交 YouTube 链接后任务失败，错误码 `SUBTITLE_UNAVAILABLE` | 该视频没有可用字幕 | 到「模型」页安装本地语音模型走语音转写（需要 FFmpeg，见下一条） |
 | 诊断里 FFmpeg 显示「未找到」 | 未安装 FFmpeg（字幕模式不需要它；只有本地语音转写需要） | `winget install Gyan.FFmpeg` 或从 ffmpeg.org 下载后加入 PATH |
 | 模型下载很慢 / 中断后重来 | 中国大陆到上游源的网络波动 | 下载支持断点续传：重试同一模型会从断点继续；不要反复取消 |
+| 模型安装失败（错误码 `ARCHIVE_INVALID`） | 归档校验未过（结构/摘要不符等） | 重试一次；仍失败时查看 `logs\engine.log` 中 `model install failed` 行的确切原因并附 issue（已脱敏） |
 | 搜索 / 历史为空但报告文件还在 | 索引与数据库不同步 | WebUI 触发「重建索引」，或重启 Engine（启动时自动对账） |
 | MCP 客户端里工具报 `ENGINE_NOT_READY` | EvoBlue Engine 没在运行 | 启动 EvoBlue（安装时自启动已默认开启）；Bridge 不会自动拉起 Engine（设计如此，ADR 0004） |
 | MCP 客户端里工具报 `ENGINE_UNAUTHORIZED` | 客户端拿到的令牌与 Engine 不一致 | 在 WebUI「客户端」页重新「安装配置」；令牌经数据目录自动发现，无需手填 |
@@ -32,4 +34,5 @@
 
 - 全部数据留在本机；无遥测（`telemetry_enabled` 默认关闭）
 - 诊断导出已脱敏：路径只保留尾部两段、Key/Cookie 只显示已配置/未配置
+- 运行日志（`logs\engine.log`）同样脱敏：凭据形状与本机令牌在落盘前被替换为 `[REDACTED]`（`docs/ENGINE_LOGGING.md`）；日志目录不可写时自动关闭文件日志，不影响使用
 - 日志不回显凭据；Engine 只绑定 127.0.0.1

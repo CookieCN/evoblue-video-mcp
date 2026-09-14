@@ -13,7 +13,7 @@ import asyncio
 import importlib.metadata
 import os
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -144,15 +144,16 @@ async def collect_diagnostics(
     pointer_file: Path | None = None,
     data_directory: Path | None = None,
     include_network: bool = False,
-    http_get: Callable[[str], Awaitable[int]] | None = None,
+    http_get: Callable[[str, Mapping[str, str]], Awaitable[int]] | None = None,
     ffmpeg_version_probe: Callable[[], Awaitable[str | None]] | None = None,
 ) -> DiagnosticsReport:
     """Run every frozen check concurrently; single failures degrade only themselves.
 
     Concurrent execution with per-check timeouts keeps the local group inside
     the frozen 15 s budget and the network-enabled run inside 30 s
-    (MCP_TOOLS.md §0.3). ``http_get`` must return the HTTP status code and is
-    injected by the endpoint so tests never touch the network.
+    (MCP_TOOLS.md §0.3). ``http_get`` receives the URL and the auth headers
+    (F1: same Bearer rule as real LLM calls) and returns the HTTP status code;
+    it is injected by the endpoint so tests never touch the network.
     """
 
     async def check_local_engine() -> DiagnosticOutcome:
@@ -253,11 +254,26 @@ async def collect_diagnostics(
         )
 
     async def check_yt_dlp() -> DiagnosticOutcome:
-        version = _dist_version("yt-dlp")
-        if version is None:
+        """Probe the extractor module itself, not packaging metadata.
+
+        F2 (feedback #1): importlib.metadata has no dist-info to read inside
+        frozen builds, which made a perfectly bundled yt-dlp diagnose as
+        "unavailable" and drag the whole report to fail. The module import is
+        the availability truth; the version display prefers dist metadata and
+        falls back to yt-dlp's own version constant.
+        """
+        try:
+            import yt_dlp  # type: ignore[import-untyped]
+            from yt_dlp.version import __version__ as module_version  # type: ignore[import-untyped]
+        except Exception as exc:  # boundary: type name only
             return DiagnosticOutcome(
-                name="yt_dlp", status="fail", message="yt-dlp 不可用, 请重新安装"
+                name="yt_dlp",
+                status="fail",
+                message="yt-dlp 不可用, 请重新安装",
+                detail=type(exc).__name__,
             )
+        del yt_dlp  # availability proven; no need to keep the reference
+        version = _dist_version("yt-dlp") or module_version
         return DiagnosticOutcome(
             name="yt_dlp", status="pass", message=f"yt-dlp {version}"
         )
@@ -347,6 +363,16 @@ async def collect_diagnostics(
         )
 
     async def check_llm_api() -> DiagnosticOutcome:
+        """Probe ``{base_url}/models`` with the SAME auth rule real calls use.
+
+        F1 (feedback #13): the probe used to be a bare GET, so providers that
+        require a Bearer token answered 401 even with a perfectly valid stored
+        key — the user then "verified" a good key as broken. The credential is
+        resolved exactly like ``ProductionHandlerFactory`` does (keyring ref
+        from the settings row); without a readable key the probe is sent
+        unauthenticated and a 401 is reported as an auth problem, not a
+        mystery. The secret itself never leaves this function.
+        """
         if not include_network:
             return DiagnosticOutcome(
                 name="llm_api", status="skipped", message="未请求网络诊断"
@@ -358,10 +384,35 @@ async def collect_diagnostics(
             return DiagnosticOutcome(
                 name="llm_api", status="skipped", message="LLM 未配置, 跳过连通性检查"
             )
-        status = await http_get(f"{base_url.rstrip('/')}/models")
+        headers: dict[str, str] = {}
+        if credential_store is not None and row is not None and row.llm_credential_ref:
+            try:
+                secret = await asyncio.to_thread(
+                    credential_store.get_secret, row.llm_credential_ref
+                )
+            except Exception:
+                return DiagnosticOutcome(
+                    name="llm_api",
+                    status="warning",
+                    message="LLM 探测未执行: 系统凭据库不可读",
+                    detail="keyring_error",
+                )
+            if secret:
+                headers = {"Authorization": f"Bearer {secret}"}
+        status = await http_get(f"{base_url.rstrip('/')}/models", headers)
         if 200 <= status < 300:
+            message = (
+                "LLM API 可达且认证有效"
+                if headers
+                else "LLM API 可达 (未配置 Key, 未验证认证)"
+            )
+            return DiagnosticOutcome(name="llm_api", status="pass", message=message)
+        if status in (401, 403):
             return DiagnosticOutcome(
-                name="llm_api", status="pass", message="LLM API 可达"
+                name="llm_api",
+                status="warning",
+                message=f"LLM 认证失败: HTTP {status} (Key 无效或未配置)",
+                detail="auth_failed",
             )
         return DiagnosticOutcome(
             name="llm_api",

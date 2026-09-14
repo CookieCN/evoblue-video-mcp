@@ -22,9 +22,12 @@ function mockFetchRouter(routes) {
     vi.fn().mockImplementation((input, init) => {
       const url = String(input);
       calls.push({ url, init: init ?? {} });
+      // most-specific match wins: position in the URL first (suffix-style
+      // keys like "/codex/install" sit further right than their page key),
+      // then length ("/api/settings/test" beats its prefix "/api/settings")
       const key = Object.keys(routes)
         .filter((k) => k !== "*" && url.includes(k))
-        .sort((a, b) => url.indexOf(b) - url.indexOf(a))[0];
+        .sort((a, b) => url.indexOf(b) - url.indexOf(a) || b.length - a.length)[0];
       const response = key ? routes[key] : routes["*"];
       return Promise.resolve({
         ok: response.ok ?? true,
@@ -160,6 +163,77 @@ describe("App", () => {
     expect(screen.getByText("queued")).toBeInTheDocument();
   });
 
+  it("filter chips query the server for failed and cancelled history", async () => {
+    // F4 (feedback #15): failed/cancelled history needs a visible entry; the
+    // chips issue an exact server-side status query and surface the stable
+    // error code for attribution.
+    const calls = mockFetchRouter({
+      "/api/jobs?status=failed": {
+        data: {
+          items: [{ job_id: "job-f", status: "failed", error_code: "LLM_AUTH_FAILED" }],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        },
+      },
+      "/api/jobs?status=cancelled": {
+        data: {
+          items: [
+            { job_id: "job-c", status: "cancelled", error_code: "CANCELLED_BY_USER" },
+          ],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        },
+      },
+      "/api/jobs": {
+        data: { items: [{ job_id: "job-1", status: "queued" }], total: 1, limit: 20, offset: 0 },
+      },
+      "/api/settings": { data: { setup_completed: true } },
+    });
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("job-1");
+    fireEvent.click(screen.getByRole("button", { name: "失败" }));
+    expect(await screen.findByText("job-f")).toBeInTheDocument();
+    expect(screen.getByText("LLM_AUTH_FAILED")).toBeInTheDocument();
+    expect(
+      calls.some((c) => c.url.includes("/api/jobs?status=failed")),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "已取消" }));
+    expect(await screen.findByText("job-c")).toBeInTheDocument();
+    expect(screen.getByText("CANCELLED_BY_USER")).toBeInTheDocument();
+  });
+
+  it("exposes the active status filter to assistive tech", async () => {
+    mockFetchRouter({
+      "/api/jobs": { data: { items: [], total: 0, limit: 20, offset: 0 } },
+      "/api/settings": { data: { setup_completed: true } },
+    });
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("group", { name: "状态筛选" });
+    expect(screen.getByRole("button", { name: "全部" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "失败" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
   it("warns when jobs are queued but first setup is incomplete", async () => {
     mockFetchRouter({
       "/api/jobs": { data: { items: [{ job_id: "job-9", status: "queued" }] } },
@@ -217,7 +291,7 @@ describe("App", () => {
       // the worker gate needs all four: provider/base URL/model/key
       expect(body.llm_provider).toBe("deepseek");
       expect(body.llm_base_url).toBe("https://api.deepseek.com");
-      expect(body.llm_model).toBe("deepseek-chat");
+      expect(body.llm_model).toBe("deepseek-flash");
       expect(body.llm_api_key).toBe("sk-test");
       expect(body.setup_completed).toBe(true);
     });
@@ -241,7 +315,7 @@ describe("App", () => {
     });
     expect(save).not.toBeDisabled();
     // clearing any other required field disables again
-    fireEvent.change(screen.getByPlaceholderText("deepseek-chat"), {
+    fireEvent.change(screen.getByPlaceholderText("deepseek-flash"), {
       target: { value: "" },
     });
     expect(save).toBeDisabled();
@@ -254,6 +328,7 @@ describe("App", () => {
           setup_completed: true,
           llm_provider: "deepseek",
           llm_base_url: "https://api.deepseek.com",
+          llm_credential_origin: "https://api.deepseek.com",
           llm_model: "deepseek-chat",
           llm_api_key_configured: true,
         },
@@ -278,6 +353,42 @@ describe("App", () => {
     expect(save).toBeDisabled();
     fireEvent.change(screen.getByPlaceholderText(/必填，存入系统凭据库/), {
       target: { value: "sk-new" },
+    });
+    expect(save).not.toBeDisabled();
+  });
+
+  it("editing the Base URL to another origin requires a key again (R1)", async () => {
+    mockFetchRouter({
+      "/api/settings": {
+        data: {
+          setup_completed: true,
+          llm_provider: "deepseek",
+          llm_base_url: "https://api.deepseek.com",
+          llm_credential_origin: "https://api.deepseek.com",
+          llm_model: "deepseek-chat",
+          llm_api_key_configured: true,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/已完成配置/);
+
+    const save = screen.getByRole("button", { name: "保存并完成设置" });
+    expect(save).not.toBeDisabled();
+
+    // editing the Base URL to a different origin invalidates the stored-key
+    // reuse — the old credential must never silently target the new site
+    fireEvent.change(screen.getByLabelText(/Base URL/), {
+      target: { value: "https://gateway.example/v1" },
+    });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/必填，存入系统凭据库/), {
+      target: { value: "sk-for-gateway" },
     });
     expect(save).not.toBeDisabled();
   });
@@ -524,5 +635,239 @@ describe("token bootstrap (P7)", () => {
     expect(await screen.findByRole("heading", { name: "EvoBlue Video MCP" })).toBeInTheDocument();
     expect(localStorage.getItem("evoblue.local_token")).toBe("good-token");
     expect(await screen.findByText("job-1")).toBeInTheDocument();
+  });
+  it("test connection probes the on-screen config and reports the graded result", async () => {
+    const calls = mockFetchRouter({
+      "/api/settings": { data: { setup_completed: false } },
+      "/api/settings/test": {
+        data: { status: "auth_failed", message: "认证失败：API Key 无效或无权限（HTTP 401）" },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/尚未完成配置/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴 API Key/), {
+      target: { value: "sk-bad" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+
+    await waitFor(() => {
+      const post = calls.find(
+        (c) => c.url.includes("/api/settings/test") && c.init.method === "POST",
+      );
+      expect(post).toBeDefined();
+      const body = JSON.parse(post.init.body);
+      expect(body.llm_provider).toBe("deepseek");
+      expect(body.llm_base_url).toBe("https://api.deepseek.com");
+      expect(body.llm_model).toBe("deepseek-flash");
+      expect(body.llm_api_key).toBe("sk-bad");
+    });
+    expect(await screen.findByText(/认证失败/)).toBeInTheDocument();
+  });
+
+  it("a rejected save surfaces the backend reason, not just the status code", async () => {
+    mockFetchRouter({
+      "/api/settings": {
+        ok: false,
+        status: 400,
+        data: { detail: "无法完成设置：LLM 配置不可运行（Provider / Base URL / 模型 / API Key 必须齐全）" },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/尚未完成配置/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴 API Key/), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存并完成设置" }));
+
+    expect(await screen.findByText(/无法完成设置/)).toBeInTheDocument();
+  });
+
+  it("pressing Enter in a field saves through the form submit path", async () => {
+    const calls = mockFetchRouter({
+      "/api/settings": { data: { setup_completed: false } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/尚未完成配置/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴 API Key/), {
+      target: { value: "sk-test" },
+    });
+    const form = screen
+      .getByRole("button", { name: "保存并完成设置" })
+      .closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.submit(form);
+
+    await waitFor(() => {
+      expect(
+        calls.find((c) => c.url.includes("/api/settings") && c.init.method === "PUT"),
+      ).toBeDefined();
+    });
+  });
+
+  it("shows a migration hint when the stored model is retired", async () => {
+    mockFetchRouter({
+      "/api/settings": {
+        data: {
+          setup_completed: true,
+          llm_provider: "deepseek",
+          llm_base_url: "https://api.deepseek.com",
+          llm_credential_origin: "https://api.deepseek.com",
+          llm_model: "deepseek-chat",
+          llm_api_key_configured: true,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/已完成配置/);
+    expect(await screen.findByText(/已下线 deepseek-chat/)).toBeInTheDocument();
+    expect(screen.getByText(/建议改为 deepseek-flash/)).toBeInTheDocument();
+  });
+
+});
+
+const STANDARD_MODEL = {
+  model_id: "sensevoice-small-int8",
+  version: "2025-07-16",
+  tier: "standard",
+  provider: "sherpa-onnx-sensevoice",
+  languages: ["zh", "en", "ja", "ko", "yue"],
+  compressed_size_bytes: 200000000,
+  installed_size_bytes: 240506435,
+  license: "FunASR Model License 1.1",
+  attribution: "upstream",
+  redistribution: "upstream_only",
+  installed: false,
+  active: false,
+  installed_path: null,
+  status: null,
+  downloaded_bytes: 0,
+  error_code: null,
+  formal_default: true,
+};
+
+describe("Models page", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("a quick double-click on install sends exactly one POST", async () => {
+    // F5 (feedback #10): the action button disables for its own model while
+    // the POST is in flight. The install fetch is held pending so the guard
+    // window is deterministic, not a race with microtask resolution.
+    const calls = [];
+    let resolveInstall = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input, init) => {
+        const url = String(input);
+        calls.push({ url, init: init ?? {} });
+        if (url.includes("/install")) {
+          return new Promise((res) => {
+            resolveInstall = () =>
+              res({ ok: true, status: 202, json: async () => STANDARD_MODEL });
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [STANDARD_MODEL] }),
+        });
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/models"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const btn = await screen.findByRole("button", { name: /安装 Standard/ });
+    fireEvent.click(btn);
+    fireEvent.click(btn); // arrives while the first POST is still pending
+    expect(
+      calls.filter((c) => c.url.includes("/install") && c.init.method === "POST"),
+    ).toHaveLength(1);
+
+    resolveInstall();
+  });
+
+  it("the action button morphs with state and the badge announces transitions", async () => {
+    const downloading = {
+      ...STANDARD_MODEL,
+      status: "downloading",
+      downloaded_bytes: 100000000, // exactly 50%
+    };
+    const calls = mockFetchRouter({
+      "/api/models": { data: { items: [downloading] } },
+      "/api/models/sensevoice-small-int8/cancel": {
+        data: { ...STANDARD_MODEL, status: "cancelled" },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/models"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const cancelBtn = await screen.findByRole("button", { name: "取消下载" });
+    // state word is in an aria-live region; the percentage sits outside it
+    const badge = screen.getByText("下载中");
+    expect(badge).toHaveAttribute("aria-live", "polite");
+    expect(screen.getByText("50%")).toBeInTheDocument();
+    expect(badge.textContent).not.toContain("%");
+    // #10 copy fix: the page copy matches the real behavior
+    expect(screen.getByText(/点击「安装」并在确认框中确认后/)).toBeInTheDocument();
+
+    fireEvent.click(cancelBtn);
+    await waitFor(() =>
+      expect(calls.some((c) => c.url.includes("/cancel"))).toBe(true),
+    );
+  });
+
+  it("a rejected install surfaces the backend reason", async () => {
+    mockFetchRouter({
+      "/api/models": { data: { items: [STANDARD_MODEL] } },
+      "/api/models/sensevoice-small-int8/install": {
+        ok: false,
+        status: 409,
+        data: { detail: "model install in progress" },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/models"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /安装 Standard/ }));
+    expect(await screen.findByText(/model install in progress/)).toBeInTheDocument();
   });
 });

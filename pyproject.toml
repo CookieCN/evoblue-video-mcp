@@ -72,7 +72,7 @@ line-length = 100
 src = ["src", "tests"]
 # .codex-worktrees/ holds foreign agent-session worktrees checked out inside
 # the repo directory; they are not this project's code.
-extend-exclude = [".codex-worktrees"]
+extend-exclude = [".codex-worktrees", "tmp-repro"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

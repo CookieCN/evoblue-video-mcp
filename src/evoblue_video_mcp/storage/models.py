@@ -24,6 +24,11 @@ class Job(Base):
     asr_recommendation_model_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_fingerprint: Mapped[str] = mapped_column(String(64))
 
+    # v9 (F3): identity projection + subtitle attribution (see migrations v9)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    subtitle_probe: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     status: Mapped[str] = mapped_column(String(32), index=True)
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -55,6 +60,11 @@ class AppSettings(Base):
     llm_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     llm_credential_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # R1b (review round 2): the endpoint (raw base URL) the credential was
+    # saved for; compared as a normalized origin at runtime. Binding/unbinding
+    # is independent of setup_completed — the value is the URL, not the
+    # normalized form, matching the v10 backfill.
+    llm_credential_origin: Mapped[str | None] = mapped_column(String(512), nullable=True)
     asr_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     whisper_cpp_executable: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[float] = mapped_column(Float)

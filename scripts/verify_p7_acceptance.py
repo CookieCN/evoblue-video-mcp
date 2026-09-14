@@ -146,10 +146,14 @@ def _run_engine_checks(engine: "InstalledEngine", args, engine_exe: Path) -> Non
     check("models accepts the persisted token", status == 200)
 
     print("  3. second instance exits 3 with the frozen message")
+    # Capture raw bytes and decode UTF-8 first, ANSI codepage as fallback:
+    # the parent shell's text default varies (UTF-8 mode vs console codepage)
+    # and the frozen child emits the Chinese message in the active codepage —
+    # pinning either side alone breaks under the other environment (Gotcha #8
+    # reader-thread crash class).
     second = subprocess.run(
         [str(engine_exe)],
         capture_output=True,
-        text=True,
         timeout=60,
         env=dict(
             os.environ,
@@ -157,12 +161,20 @@ def _run_engine_checks(engine: "InstalledEngine", args, engine_exe: Path) -> Non
             EVOBLUE_ENGINE_PORT=str(args.port),
         ),
     )
+    raw_stderr = second.stderr or b""
+    try:
+        stderr_text = raw_stderr.decode("utf-8")
+    except UnicodeDecodeError:
+        import ctypes
+
+        acp = ctypes.windll.kernel32.GetACP()
+        stderr_text = raw_stderr.decode(f"cp{acp}", errors="replace")
     check(
         "exit code 3",
         second.returncode == 3,
-        detail=f"rc={second.returncode} stderr={second.stderr[-200:]!r}",
+        detail=f"rc={second.returncode} stderr={stderr_text[-200:]!r}",
     )
-    check("frozen Chinese message on stderr", "已在运行" in second.stderr)
+    check("frozen Chinese message on stderr", "已在运行" in stderr_text)
 
     print("  4. installed exe bridge subcommand completes a real MCP handshake")
     import asyncio

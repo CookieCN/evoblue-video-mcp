@@ -16,11 +16,49 @@ class JobListItem(StrictModel):
     progress: int = Field(ge=0)
     error_code: str | None = None
     created_at: float
+    # F3 (feedback #9): identity lands with metadata; url is the fallback
+    # identifier while metadata has not been fetched yet.
+    title: str | None = None
+    platform: str | None = None
+    url: str | None = None
 
 
 class JobListResponse(StrictModel):
     items: list[JobListItem]
     total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+
+
+class UnifiedJobListItem(StrictModel):
+    """One row of the default merge view, tagged with its segment.
+
+    ``kind='job'`` rows carry the live job fields (status/error_code/url);
+    ``kind='history'`` rows are indexed reports presented as completed.
+    """
+
+    kind: Literal["job", "history"]
+    job_id: str
+    status: str
+    progress: int = Field(ge=0)
+    stage: str | None = None
+    error_code: str | None = None
+    created_at: float | None = None
+    title: str | None = None
+    platform: str | None = None
+    url: str | None = None
+
+
+class UnifiedJobListResponse(StrictModel):
+    """R9 (review round 4): the default view's ONE-snapshot answer — counts,
+    exclusion, ordering, and the page slice all come from a single SQLite
+    read transaction, so no concurrent writer commit can make the same job
+    appear in both segments."""
+
+    items: list[UnifiedJobListItem]
+    total: int = Field(ge=0)
+    jobs_total: int = Field(ge=0)
+    history_total: int = Field(ge=0)
     limit: int = Field(ge=1, le=100)
     offset: int = Field(ge=0)
 
@@ -41,6 +79,13 @@ class JobDetailResponse(StrictModel):
     asr_model_id: str | None = None
     asr_model_version: str | None = None
     asr_recommendation_model_id: str | None = None
+    # F3 (feedback #9/#11/#3)
+    title: str | None = None
+    platform: str | None = None
+    url: str | None = None
+    subtitle_probe: Literal["found", "none", "unavailable"] | None = None
+    blocked_reason: str | None = None
+    blocked_message: str | None = None
 
 
 class AppSettingsResponse(StrictModel):
@@ -50,8 +95,24 @@ class AppSettingsResponse(StrictModel):
     llm_base_url: str | None = None
     llm_model: str | None = None
     llm_api_key_configured: bool = False
+    # R1b: the endpoint the stored credential was saved for (frontend gating)
+    llm_credential_origin: str | None = None
     asr_provider: str = "auto"
     whisper_cpp_executable: str | None = None
+
+
+def _require_https_or_local_base_url(value: str | None) -> str | None:
+    """Shared rule: HTTPS, except an explicit loopback endpoint."""
+    if value is None:
+        return None
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(value)
+    if parsed.scheme == "https" and parsed.hostname:
+        return value.rstrip("/")
+    if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+        return value.rstrip("/")
+    raise ValueError("base URL must use HTTPS, except for an explicit local endpoint")
 
 
 class AppSettingsUpdate(StrictModel):
@@ -73,16 +134,37 @@ class AppSettingsUpdate(StrictModel):
     @field_validator("llm_base_url")
     @classmethod
     def validate_llm_base_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        from urllib.parse import urlsplit
+        return _require_https_or_local_base_url(value)
 
-        parsed = urlsplit(value)
-        if parsed.scheme == "https" and parsed.hostname:
-            return value.rstrip("/")
-        if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
-            return value.rstrip("/")
-        raise ValueError("base URL must use HTTPS, except for an explicit local endpoint")
+
+class AppSettingsTestInput(StrictModel):
+    """Payload for POST /api/settings/test (F1, CONFIGURATION.md).
+
+    Carries the configuration the user is LOOKING at — the endpoint probes
+    it and never persists anything.
+    """
+
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: SecretStr | None = None
+
+    @field_validator("llm_base_url")
+    @classmethod
+    def validate_llm_base_url(cls, value: str | None) -> str | None:
+        return _require_https_or_local_base_url(value)
+
+
+class SettingsTestResult(StrictModel):
+    status: Literal[
+        "ok",
+        "auth_failed",
+        "http_error",
+        "network_error",
+        "not_configured",
+        "keyring_error",
+    ]
+    message: str
 
 
 class SubmitJobInput(StrictModel):

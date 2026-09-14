@@ -98,10 +98,18 @@ class YtDlpAdapter:
             try:
                 source = await asyncio.to_thread(self._download_audio, ref, tmpdir)
             except yt_dlp.utils.DownloadError as exc:
+                # Reaching this stage means metadata already succeeded, so the
+                # video exists and is accessible — a download failure here is
+                # almost always transient (CDN hiccup, connection reset,
+                # platform risk-control 403). Classified-cause precision still
+                # applies, but the unclassifiable DEFAULT is retryable=True:
+                # the attempt budget bounds the rare permanent case, while a
+                # false fatal kills a recoverable job on one network blip
+                # (frozen acceptance hit exactly that on Bilibili).
                 raise AdapterError(
                     AUDIO_DOWNLOAD_FAILED,
                     "audio download failed",
-                    retryable=_is_retryable_download_error(exc),
+                    retryable=True,
                 ) from exc
             await asyncio.to_thread(self._transcode_wav, source, dest_path)
 

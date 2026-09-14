@@ -92,3 +92,12 @@ uv run python scripts/verify_p7_acceptance.py     # 真机安装/升级/卸载�
 | 设置保存（含报告目录双写） | SQLite `app_settings` + 指针文件 | 目录不进日志 |
 | Engine 启动冲突 | stderr 退出码 3/4 + 中文文案（一次性，不落盘） | 只含端口，不含路径 |
 | 诊断/导出 | `collect_diagnostics` 统一脱敏（redacted=true） | 路径尾部两段；Key/Cookie 只报已配置/未配置 |
+
+## F2 增补（2026-09-10）：归档模型安装复测
+
+- 内置归档模型（Lite/Standard）的 manifest 白名单改动后，发行前必须在**源码与 frozen 双管线**
+  用 manifest 钉住的同一真实归档各跑一次完整安装（`ARCHIVE_INVALID` 曾因白名单不全在首次
+  真实安装才暴露，源码单测的合成归档测不出来）。
+- 打包产物必须携带诊断所依赖的发行元数据（spec `copy_metadata`：yt-dlp 双变体，
+  sherpa-onnx/onnxruntime 仅 full）；`diagnose_environment` 在打包形态下不得把可用的
+  yt-dlp/ASR 运行时报为「不可用/未安装」。

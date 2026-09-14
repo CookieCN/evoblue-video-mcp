@@ -32,6 +32,9 @@ _CHUNK = 1024 * 1024
 # Upper bound on archive members; real model archives carry a handful of files,
 # so a pathological archive with far more is rejected before it can amplify.
 _MAX_ARCHIVE_MEMBERS = 1000
+#: Path-segment cap for one archive member; real upstream archives are
+#: ``root/model.onnx``-flat or ``root/test_wavs/x.wav`` (depth 3).
+_MAX_ARCHIVE_DEPTH = 8
 
 
 class _Readable(Protocol):
@@ -243,10 +246,14 @@ def _reject_unsafe(raw: str) -> None:
 def _member_target(raw: str) -> tuple[str, str | None]:
     """Return ``(declared_name, root)`` for a file member, or reject it.
 
-    Permits ``declared-file`` (root ``None``) and ``single-root/declared-file``
-    only. Absolute paths, drive letters, ``..``, empty segments (``a//b``) and
-    ``.`` segments (``a/./b``) are rejected, as is any nesting deeper than one
-    root directory.
+    Permits ``declared-file`` (root ``None``) and ``single-root/<nested path>``
+    (root = the first segment). Absolute paths, drive letters, ``..``, empty
+    segments (``a//b``), ``.`` segments (``a/./b``) and excessive depth are
+    rejected, as is any archive mixing bare files with a root directory.
+    Subdirectories under the single root are allowed — upstream archives ship
+    ``test_wavs/`` next to the model files — but every file still has to be
+    declared in the manifest whitelist and lands at the same relative path
+    under the install directory, so nesting adds no escape surface.
     """
     normalized = raw.replace("\\", "/")
     if normalized.startswith("/") or _DRIVE_RE.match(normalized):
@@ -257,11 +264,11 @@ def _member_target(raw: str) -> tuple[str, str | None]:
             raise ArchiveError(f"parent traversal rejected: {raw!r}")
         if part in ("", "."):
             raise ArchiveError(f"empty or '.' path segment rejected: {raw!r}")
+    if len(parts) > _MAX_ARCHIVE_DEPTH:
+        raise ArchiveError(f"path nesting too deep: {raw!r}")
     if len(parts) == 1:
         return parts[0], None
-    if len(parts) == 2:
-        return parts[1], parts[0]
-    raise ArchiveError(f"nested path rejected: {raw!r}")
+    return "/".join(parts[1:]), parts[0]
 
 
 def _stream_copy(

@@ -737,22 +737,56 @@ async def verify_fts(session: AsyncSession) -> FtsVerification:
     )
 
 
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards so a user query matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def list_report_documents(
     session: AsyncSession,
     *,
     platform: str | None = None,
     language: str | None = None,
     asr_provider: str | None = None,
+    query: str | None = None,
+    exclude_unfinished_jobs: bool = False,
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[ReportDocumentRecord], int]:
     """Indexed reports for ``GET /api/history`` (contract §1): ``active``/``stale``
-    documents, ``analyzed_at`` descending, optional exact-match filters."""
+    documents, ``analyzed_at`` descending (``id`` tiebreak keeps the order
+    deterministic across pages), optional filters plus a case-insensitive
+    substring over title/source_url (R4b server-side pushdown).
+
+    ``platform`` matches case-insensitively (R8, review round 3) — the same
+    semantics the jobs endpoint applies, so the default view's two data
+    sources answer the same filter identically.
+
+    ``exclude_unfinished_jobs`` (R6, review round 3) drops every report whose
+    job row is NOT completed. The default merge view pages two strictly
+    disjoint segments with it on: a job whose report is already indexed but
+    whose row has not advanced to completed (a failure between the indexing
+    commit and the worker's next transaction) is served by the jobs segment
+    — the job row wins — so it can never duplicate across pages.
+    """
     conditions = ["doc_status IN ('active', 'stale')"]
     params: dict[str, object] = {"limit": limit, "offset": offset}
     if platform is not None:
-        conditions.append("platform = :platform")
+        conditions.append("LOWER(platform) = LOWER(:platform)")
         params["platform"] = platform
+    if query is not None and query.strip():
+        # LIKE wildcards in the user query must match literally
+        params["q"] = "%" + _escape_like(query.strip()).lower() + "%"
+        # LIKE wildcards in the user query must match literally; the escape
+        # character is a single backslash (the Python literal '\\' is the
+        # one-character SQL escape '\' inside the query text).
+        conditions.append(
+            "(LOWER(title) LIKE :q ESCAPE '\\' OR LOWER(source_url) LIKE :q ESCAPE '\\')"
+        )
+    if exclude_unfinished_jobs:
+        conditions.append(
+            "analysis_id NOT IN (SELECT job_id FROM jobs WHERE status != 'completed')"
+        )
     if language is not None:
         conditions.append("language = :language")
         params["language"] = language
@@ -771,7 +805,7 @@ async def list_report_documents(
         await session.execute(
             text(
                 f"SELECT {_DOCUMENT_COLUMNS} FROM report_documents WHERE {where} "
-                "ORDER BY analyzed_at DESC LIMIT :limit OFFSET :offset"
+                "ORDER BY analyzed_at DESC, id DESC LIMIT :limit OFFSET :offset"
             ),
             params,
         )

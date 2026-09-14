@@ -1,6 +1,7 @@
 """Worker pipeline: submit, fetch metadata/subtitles, register artifacts."""
 
 import json
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -257,3 +258,86 @@ async def test_indexing_stage_writes_report_index(
         verification = await verify_fts(sess)
         assert verification.consistent
         assert (verification.document_count, verification.fts_row_count) == (1, 1)
+
+
+class _NoSubtitleAdapter(_FakeAdapter):
+    async def fetch_transcript(self, ref: VideoRef) -> Transcript:
+        raise AdapterError("SUBTITLE_MISSING", "no supported subtitles", retryable=False)
+
+
+class _UnavailableSubtitleAdapter(_FakeAdapter):
+    async def fetch_transcript(self, ref: VideoRef) -> Transcript:
+        raise AdapterError("SUBTITLE_UNAVAILABLE", "download failed", retryable=False)
+
+
+async def _run_two_stages(
+    session_factory: async_sessionmaker[AsyncSession],
+    adapter,
+    *,
+    asr: str = "auto",
+):
+    import tempfile
+
+    store = ArtifactStore(Path(tempfile.mkdtemp()))
+    handlers = {
+        JobStatus.FETCHING_METADATA: FetchingMetadataHandler(adapter),
+        JobStatus.FETCHING_SUBTITLES: FetchingSubtitlesHandler(adapter, store),
+    }
+    async with session_factory() as sess:
+        _submitted, reused = await submit_video(
+            sess,
+            url="https://youtu.be/dQw4w9WgXcQ",
+            config_fingerprint="cfg",
+            now=1000.0,
+            reuse_window_seconds=3600.0,
+            asr=asr,
+        )
+        assert reused is False
+    # one worker pass drives the claimed job as far as the handlers allow
+    job = await run_worker_once(
+        session_factory, owner="w1", lease_seconds=30.0, now_fn=_now, handlers=handlers
+    )
+    assert job is not None
+    return job
+
+
+async def test_metadata_backfills_identity_on_job_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F3 (#9): title/platform land when metadata succeeds — visible while
+    waiting or after failure, not only after the report exists."""
+    job = await _run_two_stages(session_factory, _FakeAdapter())
+    assert job.title == "Test"
+    assert job.platform == "youtube"
+    assert job.subtitle_probe == "found"
+
+
+async def test_subtitle_none_records_probe_and_asr_disabled_hint(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F3 (#16): ASR_DISABLED carries the conditional cookie hint; the probe
+    records 'queried, nothing usable' instead of 'no subtitles'."""
+    job = await _run_two_stages(session_factory, _NoSubtitleAdapter(), asr="disabled")
+    assert job.subtitle_probe == "none"
+    assert job.error_code == "ASR_DISABLED"
+    assert "cookie browser" in (job.error_detail or "")
+
+
+async def test_subtitle_none_falls_back_to_asr(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    job = await _run_two_stages(session_factory, _NoSubtitleAdapter())
+    assert job.subtitle_probe == "none"
+    # SUBTITLE_MISSING is not an error with ASR allowed: the pipeline moved
+    # past the subtitle stage (audio download has no handler in this test,
+    # hence the terminal INTERNAL_ERROR — not SUBTITLE_*).
+    assert job.error_code != "SUBTITLE_MISSING"
+    assert job.status in {JobStatus.DOWNLOADING_AUDIO.value, JobStatus.FAILED.value}
+
+
+async def test_subtitle_unavailable_records_probe(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    job = await _run_two_stages(session_factory, _UnavailableSubtitleAdapter())
+    assert job.subtitle_probe == "unavailable"
+    assert job.error_code == "SUBTITLE_UNAVAILABLE"

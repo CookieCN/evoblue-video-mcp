@@ -19,7 +19,12 @@ from evoblue_video_mcp.asr.registry import get_provider, list_providers
 from evoblue_video_mcp.asr.routing import QWEN3_LANGUAGES, ProviderOption, route_asr
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.llm.base import LLMError, LLMProvider
-from evoblue_video_mcp.platforms.base import SUBTITLE_MISSING, AdapterError, PlatformAdapter
+from evoblue_video_mcp.platforms.base import (
+    SUBTITLE_MISSING,
+    SUBTITLE_UNAVAILABLE,
+    AdapterError,
+    PlatformAdapter,
+)
 from evoblue_video_mcp.platforms.detector import PlatformError, detect_video
 from evoblue_video_mcp.platforms.models import Transcript, TranscriptSegment, VideoMetadata
 from evoblue_video_mcp.reports.parser import MarkdownParseError, decode_report_bytes
@@ -166,6 +171,11 @@ class FetchingMetadataHandler:
         except AdapterError as exc:
             return _adapter_outcome(exc)
 
+        # F3 (feedback #9): identity lands on the Job row the moment metadata
+        # succeeds — lists and MCP status can show title/platform while the
+        # job is still waiting or has failed. The video_metadata artifact
+        # remains the source of truth; these columns are a one-way projection
+        # persisted by the worker inside the stage transaction.
         return StageOutcome.success(
             target=JobStatus.FETCHING_SUBTITLES,
             artifact=ArtifactRecord(
@@ -176,6 +186,7 @@ class FetchingMetadataHandler:
                 storage_kind="inline_json",
                 payload_json=metadata_to_json(metadata),
             ),
+            display_update={"title": metadata.title, "platform": metadata.platform.value},
         )
 
 
@@ -194,11 +205,31 @@ class FetchingSubtitlesHandler:
             return StageOutcome.fatal(exc.error_code, error_detail=str(exc))
         except AdapterError as exc:
             if exc.error_code == SUBTITLE_MISSING:
+                # F3 (feedback #11/#16): record what the probe actually
+                # observed — "queried, nothing usable" is a fact about the
+                # video/session, never a claim that subtitles cannot exist
+                # (some are only exposed to logged-in cookie browsers).
+                probe_none = {"subtitle_probe": "none"}
                 if job.asr == "disabled":
                     return StageOutcome.fatal(
-                        "ASR_DISABLED", error_detail="no subtitles and ASR disabled"
+                        "ASR_DISABLED",
+                        error_detail=(
+                            "no subtitles and ASR disabled; some subtitles "
+                            "require a logged-in cookie browser"
+                        ),
+                        display_update=probe_none,
                     )
-                return StageOutcome.success(target=JobStatus.DOWNLOADING_AUDIO)
+                return StageOutcome.success(
+                    target=JobStatus.DOWNLOADING_AUDIO, display_update=probe_none
+                )
+            if exc.error_code == SUBTITLE_UNAVAILABLE:
+                # keep the adapter's retryable verdict (fatal() has none)
+                return StageOutcome(
+                    error_code=exc.error_code,
+                    error_detail=str(exc),
+                    retryable=exc.retryable,
+                    display_update={"subtitle_probe": "unavailable"},
+                )
             return _adapter_outcome(exc)
 
         content = transcript_to_json(transcript).encode("utf-8")
@@ -222,6 +253,7 @@ class FetchingSubtitlesHandler:
                 content_hash=stored_hash,
                 byte_size=byte_size,
             ),
+            display_update={"subtitle_probe": "found"},
         )
 
 

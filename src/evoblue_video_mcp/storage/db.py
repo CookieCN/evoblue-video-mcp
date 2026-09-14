@@ -2,7 +2,7 @@
 
 import asyncio
 import sqlite3
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Final
@@ -114,6 +114,8 @@ async def ensure_immediate_transaction(session: AsyncSession) -> None:
 @asynccontextmanager
 async def immediate_write_transaction(
     session: AsyncSession,
+    *,
+    on_commit: Callable[[], None] | None = None,
 ) -> AsyncIterator[None]:
     """Run a write as ``BEGIN IMMEDIATE`` on a session that first reads.
 
@@ -140,6 +142,13 @@ async def immediate_write_transaction(
     database that truly did not adopt the value. The ``finally`` block only
     restores the deferred execution option and never raises over the
     original outcome.
+
+    ``on_commit`` (R10, review round 4) surfaces the durable-commit VERDICT
+    to the caller: it fires exactly once, in BOTH paths that end in a
+    durable commit (the normal await and the cancellation-verdict path), so
+    exception handlers can compensate against the real database state
+    instead of assuming "cancelled ⇒ not committed". The callback must be
+    synchronous and must not raise (it runs inside cancellation handling).
     """
     await ensure_immediate_transaction(session)
     try:
@@ -166,7 +175,11 @@ async def immediate_write_transaction(
             exc = commit_task.exception()
             if exc is not None:
                 raise exc from None  # durable FAILURE → caller compensates
+            if on_commit is not None:
+                on_commit()  # durable SUCCESS under cancellation
             raise  # durable SUCCESS → keep the write, propagate the cancel
+        if on_commit is not None:
+            on_commit()  # durable SUCCESS, normal path
     finally:
         with suppress(Exception):
             await session.connection(execution_options=DEFERRED_WRITE_OPTS)

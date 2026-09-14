@@ -6,12 +6,14 @@ import platform
 import secrets
 import time
 import urllib.parse
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -31,9 +33,15 @@ from evoblue_video_mcp.application.client_config.service import (
     OperationResult,
 )
 from evoblue_video_mcp.application.diagnostics import collect_diagnostics, redact_path
+from evoblue_video_mcp.application.queue_blockers import job_blocker
 from evoblue_video_mcp.application.submit import compute_config_fingerprint, submit_video
 from evoblue_video_mcp.asr.service import ModelManagerService, ModelSummary
-from evoblue_video_mcp.config import CredentialStore, Settings, llm_credential_reference
+from evoblue_video_mcp.config import (
+    CredentialStore,
+    Settings,
+    new_llm_credential_reference,
+)
+from evoblue_video_mcp.engine_logging import LOG_DIRNAME, LOG_FILENAME
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.platforms.detector import PlatformError
 from evoblue_video_mcp.reports.parser import (
@@ -71,6 +79,7 @@ from evoblue_video_mcp.storage.repository import (
 )
 from evoblue_video_mcp.web.schemas import (
     AppSettingsResponse,
+    AppSettingsTestInput,
     AppSettingsUpdate,
     BackupInfoResponse,
     BackupListResponse,
@@ -100,8 +109,11 @@ from evoblue_video_mcp.web.schemas import (
     ReportContentResponse,
     SearchHit,
     SearchResponse,
+    SettingsTestResult,
     SubmitJobInput,
     SubmitJobResponse,
+    UnifiedJobListItem,
+    UnifiedJobListResponse,
     UninstallResponse,
 )
 
@@ -124,6 +136,126 @@ _P3_ENVELOPE_PREFIXES = (
 )
 
 _LLM_PROBE_TIMEOUT_S = 10.0
+#: Bound for keyring round-trips on the settings path. An OS credential store
+#: that blocks (locked session, frozen-app backend hiccup) must never hang the
+#: whole settings API — user feedback #12 showed model-only saves dying while
+#: key saves worked, and an unbounded get_secret holding the settings write
+#: lock is one candidate that must be impossible either way.
+_KEYRING_TIMEOUT_S = 10.0
+
+
+def _normalized_origin(base_url: str | None) -> str | None:
+    """Scheme://host[:effective-port] for an LLM base URL (None when unparseable).
+
+    R1 (review): the credential-scope boundary. Reusing a stored key is legal
+    only within this origin — hostname comparison is case-insensitive and
+    default ports (443/https, 80/http) normalize away; any host, scheme, or
+    effective-port change means the credential must be provided again.
+    """
+    if not base_url:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(base_url.strip())
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return None
+    if not parsed.scheme or not hostname:
+        return None
+    scheme = parsed.scheme.lower()
+    if port is None or (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        netloc = hostname
+    else:
+        netloc = f"{hostname}:{port}"
+    return f"{scheme}://{netloc}"
+
+
+class _SerialCredentialWriter:
+    """Strictly serialized app-wide credential mutations (R2, review).
+
+    A timed-out HTTP wait releases only the REQUEST, never the operation: the
+    write keeps its place on the single worker thread, so a late old write can
+    never overtake and overwrite a newer successful save (the review's
+    LATE_WRITE counterexample). ``True`` = confirmed within the budget;
+    ``False`` = still queued/running — the caller must answer "not confirmed",
+    never "failed, nothing happened".
+    """
+
+    def __init__(self, store: CredentialStore) -> None:
+        self._store = store
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="evoblue-cred"
+        )
+
+    async def _submit(self, fn: Callable[[], object], *, timeout_s: float) -> bool:
+        loop = asyncio.get_running_loop()
+        # shield: a timed-out (or cancelled) request must not cancel the
+        # queued operation itself — "not confirmed" keeps the promise that
+        # the write still runs, strictly in submission order.
+        future = asyncio.shield(loop.run_in_executor(self._executor, fn))
+        try:
+            await asyncio.wait_for(future, timeout_s)
+            return True
+        except Exception:
+            # timeout (still pending), request cancellation, or the store's
+            # own failure — none of them may surface as a fake confirmation.
+            return False
+
+    async def set_secret(
+        self, reference: str, secret: str, *, timeout_s: float = _KEYRING_TIMEOUT_S
+    ) -> bool:
+        return await self._submit(
+            lambda: self._store.set_secret(reference, secret), timeout_s=timeout_s
+        )
+
+    async def delete_secret(
+        self, reference: str, *, timeout_s: float = _KEYRING_TIMEOUT_S
+    ) -> bool:
+        return await self._submit(
+            lambda: self._store.delete_secret(reference), timeout_s=timeout_s
+        )
+
+    def submit_delete(self, reference: str) -> None:
+        """Best-effort LATER cleanup of a slot nothing references (R5).
+
+        No wait, no result: the delete is enqueued on the same single worker
+        thread strictly AFTER previously submitted operations, so deleting a
+        slot whose write is still in flight is safe by ordering. A lost
+        cleanup (app shutdown) only leaves a stale unreferenced secret in the
+        local vault — never a wrong binding, which is the only failure that
+        matters here.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        future = loop.run_in_executor(
+            self._executor, lambda: self._store.delete_secret(reference)
+        )
+        future.add_done_callback(_swallow_future)
+
+
+def _swallow_future(future: asyncio.Future[Any]) -> None:
+    """A fire-and-forget cleanup must not raise into the event loop."""
+    from contextlib import suppress
+
+    with suppress(Exception):
+        future.result()
+
+
+async def _get_secret_bounded(
+    credential_store: CredentialStore, reference: str
+) -> str | None:
+    """Read a secret with a timeout; a timeout reads as "unavailable".
+
+    The underlying thread cannot be cancelled and may still deliver later —
+    callers treat a timeout like any other keyring failure and the state
+    converges on the next successful call.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(credential_store.get_secret, reference),
+        timeout=_KEYRING_TIMEOUT_S,
+    )
 
 
 async def _credential_is_configured(
@@ -133,21 +265,23 @@ async def _credential_is_configured(
     if credential_store is None or reference is None:
         return False
     try:
-        return bool(await asyncio.to_thread(credential_store.get_secret, reference))
+        return bool(await _get_secret_bounded(credential_store, reference))
     except Exception:
         return False
 
 
-def _llm_status_probe() -> Callable[[str], Awaitable[int]]:
-    """Build an injectable GET-status probe for the diagnostics network check.
+def _llm_status_probe() -> Callable[[str, Mapping[str, str]], Awaitable[int]]:
+    """Build an injectable GET-status probe for LLM connectivity checks.
 
-    Takes the full URL (collect_diagnostics applies the configured base_url)
-    so tests can inject a fake and never touch the network.
+    Takes the full URL plus auth headers (F1: the same Bearer rule real LLM
+    calls use) so tests can inject a fake and never touch the network.
+    Redirects are not followed, so a cross-origin redirect can never carry the
+    Authorization header to a second origin.
     """
 
-    async def probe(url: str) -> int:
+    async def probe(url: str, headers: Mapping[str, str]) -> int:
         async with _HttpClient(timeout=_LLM_PROBE_TIMEOUT_S) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=dict(headers))
             return response.status_code
 
     return probe
@@ -187,6 +321,9 @@ def _to_list_item(job: Job) -> JobListItem:
         progress=job.progress,
         error_code=job.error_code,
         created_at=job.created_at,
+        title=job.title,
+        platform=job.platform,
+        url=job.url,
     )
 
 
@@ -207,6 +344,10 @@ def _to_detail(job: Job) -> JobDetailResponse:
         asr_model_id=job.asr_model_id,
         asr_model_version=job.asr_model_version,
         asr_recommendation_model_id=job.asr_recommendation_model_id,
+        title=job.title,
+        platform=job.platform,
+        url=job.url,
+        subtitle_probe=job.subtitle_probe,  # type: ignore[arg-type]
     )
 
 
@@ -300,6 +441,7 @@ def create_app(
         _register_data_endpoints(
             app, session_factory, token, credential_store, model_service,
             report_pointer_file,
+            engine_port=app_settings.engine_port,
         )
         _register_history_endpoints(
             app, session_factory, token, index_rebuild_service
@@ -431,6 +573,16 @@ def _register_diagnostics_endpoint(
                 "whisper_cli_configured": (
                     bool(row.whisper_cpp_executable) if row else False
                 ),
+                # Expected location only — presence is not guaranteed (the
+                # file log degrades silently on an unwritable data dir; see
+                # docs/ENGINE_LOGGING.md section 6).
+                "engine_log_file": (
+                    redact_path(
+                        Path(data_directory) / LOG_DIRNAME / LOG_FILENAME
+                    )
+                    if data_directory is not None
+                    else None
+                ),
             },
             "index": {"open_issues": open_issues},
             "redacted": True,
@@ -449,6 +601,7 @@ def _register_data_endpoints(
     credential_store: CredentialStore | None,
     model_service: ModelManagerService | None,
     report_pointer_file: Path | None = None,
+    engine_port: int = 8765,
 ) -> None:
     dependencies = [Depends(_local_token_dependency(token))] if token else []
 
@@ -460,18 +613,138 @@ def _register_data_endpoints(
     # made atomic; this bounds the divergence to a compensated-then-failed
     # double fault, which logs loudly.
     settings_write_lock = asyncio.Lock()
+    # R2 (review): credential mutations serialize on this app-owned writer —
+    # its single worker thread outlives any one request, so a timed-out save
+    # releases only the HTTP wait and never the operation's ordering.
+    credential_writer = (
+        _SerialCredentialWriter(credential_store)
+        if credential_store is not None
+        else None
+    )
 
     @app.get("/api/jobs", response_model=JobListResponse, dependencies=dependencies)
     async def jobs_list(
         limit: int = Query(default=20, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
         status: JobStatus | None = None,
+        status_group: str | None = Query(default=None, pattern="^(non_completed)$"),
+        platform: str | None = Query(default=None, max_length=64),
+        query: str | None = Query(default=None, max_length=200),
     ) -> JobListResponse:
         async with session_factory() as sess:
-            items, total = await list_jobs(sess, limit=limit, offset=offset, status=status)
+            items, total = await list_jobs(
+                sess,
+                limit=limit,
+                offset=offset,
+                status=status,
+                status_group=status_group,
+                platform=platform,
+                query=query,
+            )
         return JobListResponse(
             items=[_to_list_item(job) for job in items],
             total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/api/jobs/unified",
+        response_model=UnifiedJobListResponse,
+        dependencies=dependencies,
+    )
+    async def jobs_unified_list(
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        platform: str | None = Query(default=None, max_length=64),
+        query: str | None = Query(default=None, max_length=200),
+    ) -> UnifiedJobListResponse:
+        """R9 (review round 4, P1): the default merge view's ONE-snapshot query.
+
+        Paging two endpoints (jobs, then history) let a worker commit a job's
+        completion BETWEEN the two requests: the job row had already been
+        returned while its report became newly eligible for the history
+        segment — same job twice, total double counted. Here every read —
+        both segment counts, the unfinished-job exclusion, and both page
+        slices — runs inside ONE SQLite read transaction: the first query
+        pins the WAL snapshot and nothing a concurrent writer commits
+        afterwards is visible, so the answer is internally consistent by
+        construction. Segments are ordered active → terminal (R7), then
+        history (analyzed_at desc); a report whose job row is not completed
+        is excluded (task row wins, R6). Route order matters: this must be
+        registered BEFORE ``/api/jobs/{job_id}``.
+        """
+        async with session_factory() as sess:
+            # 1-row probe pins the snapshot and yields the jobs-segment total
+            _, jobs_total = await list_jobs(
+                sess, limit=1, offset=0, status_group="non_completed",
+                platform=platform, query=query,
+            )
+            jobs: list[Job] = []
+            if offset < jobs_total:
+                jobs, _ = await list_jobs(
+                    sess,
+                    limit=min(limit, jobs_total - offset),
+                    offset=offset,
+                    status_group="non_completed",
+                    platform=platform,
+                    query=query,
+                )
+            remaining = limit - len(jobs)
+            if remaining > 0:
+                history_offset = 0 if offset < jobs_total else offset - jobs_total
+                history, history_total = await list_report_documents(
+                    sess,
+                    platform=platform,
+                    query=query,
+                    exclude_unfinished_jobs=True,
+                    limit=remaining,
+                    offset=history_offset,
+                )
+            else:
+                # the page lies wholly inside the jobs segment: the history
+                # total is still part of the answer (count-only probe)
+                _, history_total = await list_report_documents(
+                    sess,
+                    platform=platform,
+                    query=query,
+                    exclude_unfinished_jobs=True,
+                    limit=1,
+                    offset=0,
+                )
+                history = []
+        items = [
+            UnifiedJobListItem(
+                kind="job",
+                job_id=job.job_id,
+                status=job.status,
+                stage=job.stage,
+                progress=job.progress,
+                error_code=job.error_code,
+                created_at=job.created_at,
+                title=job.title,
+                platform=job.platform,
+                url=job.url,
+            )
+            for job in jobs
+        ]
+        items.extend(
+            UnifiedJobListItem(
+                kind="history",
+                job_id=record.job_id,
+                status=JobStatus.COMPLETED.value,
+                progress=100,
+                title=record.title,
+                platform=record.platform,
+                url=record.source_url,
+            )
+            for record in history
+        )
+        return UnifiedJobListResponse(
+            items=items,
+            total=jobs_total + history_total,
+            jobs_total=jobs_total,
+            history_total=history_total,
             limit=limit,
             offset=offset,
         )
@@ -482,7 +755,21 @@ def _register_data_endpoints(
             job = await get_job(sess, job_id=job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
-        return _to_detail(job)
+        detail = _to_detail(job)
+        # F3 (feedback #3): a queued/waiting job carries WHY it is not moving
+        # (same gate the worker applies, bounded local checks only) so MCP
+        # clients stop seeing a bare "已排队, 等待处理".
+        blocker = await job_blocker(
+            session_factory,
+            status=job.status,
+            asr_recommendation_model_id=job.asr_recommendation_model_id,
+            credential_store=credential_store,
+            engine_port=engine_port,
+        )
+        if blocker is not None:
+            detail.blocked_reason = blocker["reason"]
+            detail.blocked_message = blocker["message"]
+        return detail
 
     @app.post(
         "/api/jobs/{job_id}/cancel",
@@ -516,6 +803,7 @@ def _register_data_endpoints(
             llm_api_key_configured=await _credential_is_configured(
                 credential_store, current.llm_credential_ref
             ),
+            llm_credential_origin=current.llm_credential_origin,
             asr_provider=current.asr_provider or "auto",
             whisper_cpp_executable=current.whisper_cpp_executable,
         )
@@ -531,11 +819,40 @@ def _register_data_endpoints(
                 if "llm_provider" in fields
                 else (current.llm_provider if current else None)
             )
+            merged_base_url = (
+                payload.llm_base_url
+                if "llm_base_url" in fields
+                else (current.llm_base_url if current else None)
+            )
+            key_in_payload = "llm_api_key" in fields and bool(
+                payload.llm_api_key and payload.llm_api_key.get_secret_value()
+            )
+            # R1b (review round 2): credential binding is decided HERE,
+            # independent of setup_completed — whether setup is open or closed
+            # must never decide whether the old secret follows an edited
+            # endpoint. A new key binds to the merged origin; a provider switch
+            # or an origin change without a new key ATOMICALLY UNBINDS (the
+            # stored secret stays in the vault, merely unreferenced) instead of
+            # silently retargeting it at the new site.
             credential_ref = current.llm_credential_ref if current else None
-            if "llm_provider" in fields and provider != (current.llm_provider if current else None):
-                credential_ref = llm_credential_reference(provider or "")
-            if "llm_api_key" in fields and payload.llm_api_key:
-                credential_ref = llm_credential_reference(provider or "")
+            recorded_origin = current.llm_credential_origin if current else None
+            credential_origin_value = recorded_origin
+            if key_in_payload:
+                # R5 (review round 3): every write targets its OWN fresh slot
+                # — the database commit below is the switching point, so a
+                # failed or late write can only leave an unreferenced slot,
+                # never retarget the old binding's slot in place.
+                credential_ref = new_llm_credential_reference(provider or "")
+                credential_origin_value = merged_base_url
+            elif (
+                "llm_provider" in fields
+                and provider != (current.llm_provider if current else None)
+            ) or ("llm_base_url" in fields and (
+                _normalized_origin(merged_base_url)
+                != _normalized_origin(recorded_origin)
+            )):
+                credential_ref = None
+                credential_origin_value = None
 
             # Runnable-setup invariant (P1 review rounds 2-3): the FINAL state
             # after this save must pass the same gate
@@ -558,22 +875,17 @@ def _register_data_endpoints(
                 else (current.setup_completed if current else False)
             )
             if final_setup_completed:
-                merged_base_url = (
-                    payload.llm_base_url
-                    if "llm_base_url" in fields
-                    else (current.llm_base_url if current else None)
-                )
                 merged_model = (
                     payload.llm_model
                     if "llm_model" in fields
                     else (current.llm_model if current else None)
                 )
-                key_in_payload = "llm_api_key" in fields and bool(
-                    payload.llm_api_key and payload.llm_api_key.get_secret_value()
-                )
                 # an explicit empty llm_api_key DELETES the stored secret later
                 # in this handler — the stored key must not count as configured
                 key_deleted = "llm_api_key" in fields and not key_in_payload
+                # R1b: the stored key counts only when the binding above kept
+                # it — origin/provider changes already unbound the credential,
+                # so this lookup can only succeed for a same-origin reuse.
                 key_stored = False
                 if (
                     not key_in_payload
@@ -583,9 +895,7 @@ def _register_data_endpoints(
                 ):
                     try:
                         key_stored = bool(
-                            await asyncio.to_thread(
-                                credential_store.get_secret, credential_ref
-                            )
+                            await _get_secret_bounded(credential_store, credential_ref)
                         )
                     except Exception:
                         key_stored = False
@@ -601,27 +911,64 @@ def _register_data_endpoints(
                         detail=(
                             "无法完成设置：LLM 配置不可运行"
                             "（Provider / Base URL / 模型 / API Key 必须齐全，"
-                            "API Key 需已存入凭据库；切换 Provider 后必须填写新 Key）"
+                            "API Key 需已存入凭据库；切换 Provider 或修改 Base URL 地址后"
+                            "必须填写该端点的 API Key）"
                         ),
                     )
 
+            # R5 (review round 3): keyring and SQLite switch atomically BY
+            # CONSTRUCTION — prepare, commit, cleanup:
+            #   - a new key is written to its own FRESH slot first; a failed
+            #     database save (or a write that times out and lands late)
+            #     then only leaves an unreferenced slot behind — the old
+            #     binding and its secret stay intact, and endpoint B's key
+            #     can never end up in endpoint A's slot;
+            #   - a deletion unbinds the DATABASE first; the slot cleanup
+            #     runs only after the row has adopted ref=None.
+            fresh_slot: str | None = None
+            replaced_slots: list[str] = []
             if "llm_api_key" in fields:
-                if credential_store is None:
+                if credential_writer is None:
                     raise HTTPException(status_code=503, detail="credential store unavailable")
-                credential_ref = llm_credential_reference(provider or "")
                 secret = payload.llm_api_key.get_secret_value() if payload.llm_api_key else ""
-                try:
-                    if secret:
-                        await asyncio.to_thread(
-                            credential_store.set_secret, credential_ref, secret
+                # R2 (review): writes go through the app-wide serial credential
+                # writer. A timeout ends ONLY this request's wait — the write
+                # keeps its place on the single worker thread.
+                if secret:
+                    if credential_ref is None:
+                        # Defensive only: key_in_payload always assigns a
+                        # fresh reference in the binding block above; None
+                        # here means a refactor broke that invariant —
+                        # refuse rather than guess a slot.
+                        raise HTTPException(
+                            status_code=503, detail="credential reference missing"
                         )
-                    else:
-                        await asyncio.to_thread(credential_store.delete_secret, credential_ref)
-                        credential_ref = None
-                except Exception as exc:
-                    raise HTTPException(
-                        status_code=503, detail="credential store unavailable"
-                    ) from exc
+                    confirmed = await credential_writer.set_secret(
+                        credential_ref, secret, timeout_s=_KEYRING_TIMEOUT_S
+                    )
+                    if not confirmed:
+                        # The write keeps running late into a slot nothing
+                        # references: queue its cleanup BEHIND it (serial
+                        # ordering) and answer "not confirmed".
+                        credential_writer.submit_delete(credential_ref)
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "凭据写入尚未确认（操作仍在队列中执行）；"
+                                "请稍后重试或读取配置确认"
+                            ),
+                        )
+                    fresh_slot = credential_ref
+                    if current is not None and current.llm_credential_ref:
+                        replaced_slots.append(current.llm_credential_ref)
+                else:
+                    # explicit empty key DELETES the stored credential: the
+                    # unbind rides the database transaction below; the slot
+                    # cleanup happens only after that commit succeeds.
+                    if current is not None and current.llm_credential_ref:
+                        replaced_slots.append(current.llm_credential_ref)
+                    credential_ref = None
+                    credential_origin_value = None
             report_directory_value = (
                 payload.report_directory
                 if "report_directory" in fields
@@ -655,36 +1002,67 @@ def _register_data_endpoints(
                         "(code=REPORT_POINTER_COMPENSATION_FAILED)"
                     )
 
-            if pointer_dir is not None:
-                # §4 dual-write policy: the recovery pointer goes FIRST
-                # (atomically) — by the time the API answers success, pointer
-                # and database agree. A pointer failure aborts the whole save
-                # (503) with the database untouched; the reverse ordering
-                # would let the database adopt a directory the recovery
-                # pointer does not know — a split-brain that only surfaces
-                # after SQLite deletion. Clearing writes an empty tombstone
-                # through the same atomic path, and ANY pointer failure
-                # (including a failed clear) refuses the database commit — a
-                # silently cleared pointer would let a stale directory revive
-                # after the database is deleted.
-                try:
-                    previous_pointer = read_report_pointer(pointer_dir)
-                except RebuildRootUnavailable as exc:
-                    raise HTTPException(
-                        status_code=503, detail="report pointer could not be read"
-                    ) from exc
-                # Inline write (not ``to_thread``): see _restore_pointer — a
-                # cancelled thread would keep running and could re-overwrite
-                # the compensated pointer AFTER the restore. Settings saves
-                # are low-frequency; the brief fsync on the event loop is the
-                # price of the indivisible critical section.
-                try:
-                    write_report_pointer(pointer_dir, pointer_value)
-                except OSError as exc:
-                    raise HTTPException(
-                        status_code=503, detail="report pointer could not be updated"
-                    ) from exc
+            def _cleanup_unadopted_fresh_slot() -> None:
+                """The database did NOT adopt the fresh slot — delete it.
+
+                Safe on BOTH failure paths: a plain exception means a
+                definitive rollback, and an uncommitted cancellation is
+                equally definitive (R12, review round 5) — ``on_commit``
+                fires on every durable-success path BEFORE the cancel
+                propagates, so a False verdict proves nothing was adopted.
+                """
+                if fresh_slot is not None and credential_writer is not None:
+                    credential_writer.submit_delete(fresh_slot)
+
+            def _cleanup_replaced_slots() -> None:
+                """After a DURABLE commit the replaced slots are pure garbage
+                — best-effort cleanup (a lost one only leaves a stale
+                unreferenced secret)."""
+                if credential_writer is not None:
+                    for slot in replaced_slots:
+                        credential_writer.submit_delete(slot)
+
+            # R10 (review round 4): the durable-commit verdict, delivered by
+            # the transaction helper in BOTH paths that end in a durable
+            # commit — including the one where a cancellation landed on the
+            # commit await and the cancel propagates with the write KEPT.
+            commit_state = {"committed": False}
+            pointer_replaced = False
             try:
+                if pointer_dir is not None:
+                    # §4 dual-write policy: the recovery pointer goes FIRST
+                    # (atomically) — by the time the API answers success,
+                    # pointer and database agree. A pointer failure aborts
+                    # the whole save (503) with the database untouched; the
+                    # reverse ordering would let the database adopt a
+                    # directory the recovery pointer does not know — a
+                    # split-brain that only surfaces after SQLite deletion.
+                    # Clearing writes an empty tombstone through the same
+                    # atomic path, and ANY pointer failure (including a
+                    # failed clear) refuses the database commit — a silently
+                    # cleared pointer would let a stale directory revive
+                    # after the database is deleted.
+                    try:
+                        previous_pointer = read_report_pointer(pointer_dir)
+                    except RebuildRootUnavailable as exc:
+                        raise HTTPException(
+                            status_code=503, detail="report pointer could not be read"
+                        ) from exc
+                    # Inline write (not ``to_thread``): see _restore_pointer —
+                    # a cancelled thread would keep running and could
+                    # re-overwrite the compensated pointer AFTER the restore.
+                    # Settings saves are low-frequency; the brief fsync on
+                    # the event loop is the price of the indivisible critical
+                    # section. No await can fire between the write and the
+                    # flag below, so compensation never runs for a pointer
+                    # that was never replaced.
+                    try:
+                        write_report_pointer(pointer_dir, pointer_value)
+                    except OSError as exc:
+                        raise HTTPException(
+                            status_code=503, detail="report pointer could not be updated"
+                        ) from exc
+                    pointer_replaced = True
                 # §6: reads-then-writes run as BEGIN IMMEDIATE so a
                 # concurrent writer committing in between cannot kill the
                 # save with an unretryable BUSY_SNAPSHOT.
@@ -692,12 +1070,10 @@ def _register_data_endpoints(
                 # §4 exact compensation: ``commit=False`` keeps the commit in
                 # THIS transaction, as the LAST statement before the context
                 # exits — there is no post-commit await left inside the try.
-                # Therefore reaching the handlers below PROVES the database
-                # did not adopt the value, and restoring the pointer is
-                # always correct; a failure AFTER the commit (reconcile,
-                # response encoding) never enters these handlers, so the
-                # stores can never be pushed apart by compensation itself.
-                async with session_factory() as sess, immediate_write_transaction(sess):
+                async with session_factory() as sess, immediate_write_transaction(
+                    sess,
+                    on_commit=lambda: commit_state.__setitem__("committed", True),
+                ):
                     saved = await save_app_settings(
                         sess,
                         setup_completed=(
@@ -719,6 +1095,7 @@ def _register_data_endpoints(
                             else (current.llm_model if current else None)
                         ),
                         llm_credential_ref=credential_ref,
+                        llm_credential_origin=credential_origin_value,
                         asr_provider=(
                             payload.asr_provider
                             if "asr_provider" in fields
@@ -732,19 +1109,42 @@ def _register_data_endpoints(
                         commit=False,
                     )
             except asyncio.CancelledError:
-                # A PUT cancelled between the pointer replace and the database
-                # commit must not leave the pointer ahead of the database (§4)
-                # — compensation covers CANCELLATION, then the cancel
-                # propagates.
-                _restore_pointer()
+                # R10: compensation follows the REAL commit verdict. A cancel
+                # landing on the commit await may still leave the write
+                # durable — the transaction helper keeps it and propagates
+                # the cancel — and restoring the old pointer THEN would split
+                # database (=new) and pointer (=old). Only an uncommitted
+                # cancel compensates the pointer; a committed one finishes
+                # the slot cleanup instead.
+                if commit_state["committed"]:
+                    _cleanup_replaced_slots()
+                else:
+                    # R12 (review round 5): ``on_commit`` fires on EVERY
+                    # durable-success path BEFORE the cancel propagates, so
+                    # False here PROVES the database never adopted the write
+                    # — the fresh slot is unreferenced and must be cleaned
+                    # along with the pointer restore, not left in the vault.
+                    _restore_pointer()
+                    _cleanup_unadopted_fresh_slot()
                 raise
             except Exception as exc:
-                # The database did NOT adopt the value: put the pointer back
-                # so the stores cannot diverge behind a 503 (§4).
-                _restore_pointer()
+                # The database did NOT adopt the value (plain failure ⇒
+                # definitive rollback): put the pointer back — only if it was
+                # actually replaced, a failed pointer write never changed it
+                # — and drop the unadopted fresh keyring slot (R5/R11: the
+                # pointer-failure exits above land here too).
+                if pointer_replaced:
+                    _restore_pointer()
+                _cleanup_unadopted_fresh_slot()
+                if isinstance(exc, HTTPException):
+                    raise
                 raise HTTPException(
                     status_code=503, detail="settings could not be saved"
                 ) from exc
+            # The commit ADOPTED the new binding (this point is reached only
+            # after a successful commit): the replaced slots are pure garbage
+            # now — clean them up best-effort.
+            _cleanup_replaced_slots()
         if "whisper_cpp_executable" in fields and model_service is not None:
             # A newly usable CLI can unblock jobs parked on a whisper
             # recommendation; provider registration and the resume both happen
@@ -760,8 +1160,100 @@ def _register_data_endpoints(
             llm_api_key_configured=await _credential_is_configured(
                 credential_store, saved.llm_credential_ref
             ),
+            llm_credential_origin=saved.llm_credential_origin,
             asr_provider=saved.asr_provider or "auto",
             whisper_cpp_executable=saved.whisper_cpp_executable,
+        )
+
+    @app.post("/api/settings/test", response_model=SettingsTestResult, dependencies=dependencies)
+    async def settings_test(payload: AppSettingsTestInput) -> SettingsTestResult:
+        """F1 (feedback #8/#13): probe the configuration the user is LOOKING at.
+
+        Contract (CONFIGURATION.md §LLM 连接测试): GET ``{base_url}/models``
+        with a Bearer token taken from the payload's own key, or — only when
+        the provider is UNCHANGED — the stored credential. This endpoint NEVER
+        persists: no database write, no keyring write, no setup side effects;
+        saving stays deliberately separate from network verification so a
+        flaky network cannot block saving. Redirects are not followed, so the
+        Authorization header can never travel to a second origin.
+        """
+        async with session_factory() as sess:
+            current = await get_app_settings(sess)
+        base_url = payload.llm_base_url or (current.llm_base_url if current else None)
+        if not base_url:
+            return SettingsTestResult(
+                status="not_configured", message="未配置 Base URL，无法测试"
+            )
+        provider = payload.llm_provider or (current.llm_provider if current else None)
+        api_key = ""
+        own_key = payload.llm_api_key.get_secret_value().strip() if payload.llm_api_key else ""
+        # R1b (review round 2): a stored credential is scoped to the ORIGIN
+        # RECORDED WITH IT (llm_credential_origin), not to the current Base URL
+        # — the row's URL is editable and must never redefine where the old
+        # secret may travel. Same provider AND same recorded origin, or an
+        # explicit new key.
+        origin_matches = (
+            current is not None
+            and current.llm_credential_ref is not None
+            and _normalized_origin(base_url)
+            == _normalized_origin(current.llm_credential_origin)
+        )
+        if own_key:
+            api_key = own_key
+        elif (
+            origin_matches
+            and current is not None
+            and current.llm_credential_ref
+            and provider is not None
+            and current.llm_provider is not None
+            and current.llm_provider.strip().lower() == provider.strip().lower()
+            and credential_store is not None
+        ):
+            # Same guard as the save gate: a stored key is reusable only for
+            # the SAME provider AND endpoint — switching either must never
+            # point the old credential at a new target.
+            try:
+                api_key = await _get_secret_bounded(
+                    credential_store, current.llm_credential_ref
+                ) or ""
+            except Exception:
+                return SettingsTestResult(
+                    status="keyring_error", message="系统凭据库暂时不可读，无法读取已存 Key"
+                )
+        if not api_key:
+            if not origin_matches:
+                return SettingsTestResult(
+                    status="not_configured",
+                    message=(
+                        "Base URL 与已存 Key 的地址不一致："
+                        "请为新地址显式输入 API Key（已存 Key 不会自动发送到新地址）"
+                    ),
+                )
+            return SettingsTestResult(
+                status="not_configured",
+                message="未提供 API Key（留空仅在同一 Provider 和同一地址下复用已存 Key）",
+            )
+        probe = _llm_status_probe()
+        try:
+            status_code = await probe(
+                f"{base_url.rstrip('/')}/models",
+                {"Authorization": f"Bearer {api_key}"},
+            )
+        except httpx.HTTPError:
+            return SettingsTestResult(
+                status="network_error", message="无法连接服务器（超时或网络不可达）"
+            )
+        if 200 <= status_code < 300:
+            return SettingsTestResult(
+                status="ok", message="连接成功：服务器可达且 Key 认证有效"
+            )
+        if status_code in (401, 403):
+            return SettingsTestResult(
+                status="auth_failed",
+                message=f"认证失败：API Key 无效或无权限（HTTP {status_code}）",
+            )
+        return SettingsTestResult(
+            status="http_error", message=f"服务器响应异常：HTTP {status_code}"
         )
 
     @app.post("/api/jobs", response_model=SubmitJobResponse, dependencies=dependencies)
@@ -959,6 +1451,8 @@ def _register_history_endpoints(
         platform: str | None = None,
         language: str | None = None,
         asr_provider: str | None = None,
+        query: str | None = Query(default=None, max_length=200),
+        exclude_unfinished_jobs: bool = Query(default=False),
     ) -> HistoryListResponse:
         if not 1 <= limit <= 100 or offset < 0:
             raise HistoryApiError(422, "INVALID_FILTER", "limit/offset out of range")
@@ -968,6 +1462,8 @@ def _register_history_endpoints(
                 platform=platform,
                 language=language,
                 asr_provider=asr_provider,
+                query=query,
+                exclude_unfinished_jobs=exclude_unfinished_jobs,
                 limit=limit,
                 offset=offset,
             )

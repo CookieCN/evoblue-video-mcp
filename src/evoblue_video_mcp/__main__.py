@@ -19,6 +19,7 @@ Packaged builds (P7, INSTALLER_RELEASE_CONTRACT):
     payload, contract section 5).
 """
 
+import logging
 import os
 import secrets
 import sys
@@ -31,6 +32,10 @@ from fastapi import FastAPI
 
 import evoblue_video_mcp
 from evoblue_video_mcp.config.settings import Settings
+from evoblue_video_mcp.engine_logging import (
+    engine_log_config,
+    setup_engine_file_logging,
+)
 from evoblue_video_mcp.runtime import singleton
 from evoblue_video_mcp.runtime.bootstrap import create_runtime_app, resolve_runtime_paths
 
@@ -195,6 +200,18 @@ def main(argv: list[str] | None = None) -> int:
         token = _persisted_local_token(settings, paths.data)
         settings = settings.model_copy(update={"local_access_token": token})
 
+    # F0 file logging (docs/ENGINE_LOGGING.md): strictly after the single-
+    # instance guard (a second instance must not touch the first one's log
+    # file) and after token persistence (the token is an exact-match scrub
+    # secret). An unwritable location silently degrades — never fatal.
+    engine_log = setup_engine_file_logging(
+        paths.data, known_secrets=[token] if token else ()
+    )
+    if engine_log is not None:
+        logging.getLogger("evoblue_video_mcp.engine").info(
+            "engine file log enabled (version %s)", evoblue_video_mcp.__version__
+        )
+
     app = create_runtime_app(settings)
     dist = _mount_frontend(app)
     _maybe_open_ui(settings, dist, token)
@@ -203,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         host=settings.engine_host,
         port=settings.engine_port,
         log_level="info",
+        log_config=engine_log_config(engine_log) if engine_log is not None else None,
     )
     singleton.release_lock(paths.data)
     return 0

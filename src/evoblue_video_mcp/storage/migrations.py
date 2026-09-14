@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
 
@@ -340,6 +340,45 @@ async def _apply_v8(conn: AsyncConnection) -> None:
         await conn.execute(text(statement))
 
 
+# v9 (F3, feedback #9/#11/#16): list/detail identity + subtitle attribution.
+# title/platform are a PROJECTION written once when the metadata stage
+# succeeds (the video_metadata artifact stays the source of truth); url is
+# the fallback identifier before metadata lands. subtitle_probe records what
+# the subtitle stage actually observed: found / none (queried, nothing
+# usable — ASR fallback path) / unavailable (request or parse failed).
+_V9_STATEMENTS: list[str] = [
+    "ALTER TABLE jobs ADD COLUMN title TEXT",
+    "ALTER TABLE jobs ADD COLUMN platform VARCHAR(32)",
+    "ALTER TABLE jobs ADD COLUMN subtitle_probe VARCHAR(32)",
+]
+
+
+async def _apply_v9(conn: AsyncConnection) -> None:
+    for statement in _V9_STATEMENTS:
+        await conn.execute(text(statement))
+
+
+# v10 (R1b, review round 2): persist the endpoint each credential was saved
+# for. The credential-origin boundary must hold independent of
+# setup_completed — a row that changed its Base URL without a new key must
+# not keep pointing the old secret at the new site. Backfill assumes the
+# pre-v10 credential belongs to the URL stored alongside it (true for every
+# version that could write a credential); the raw URL is stored and compared
+# as a normalized origin at runtime.
+_V10_STATEMENTS: list[str] = [
+    "ALTER TABLE app_settings ADD COLUMN llm_credential_origin VARCHAR(512)",
+    (
+        "UPDATE app_settings SET llm_credential_origin = llm_base_url "
+        "WHERE llm_credential_ref IS NOT NULL AND llm_base_url IS NOT NULL"
+    ),
+]
+
+
+async def _apply_v10(conn: AsyncConnection) -> None:
+    for statement in _V10_STATEMENTS:
+        await conn.execute(text(statement))
+
+
 _MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _apply_v1),
     (2, _apply_v2),
@@ -349,6 +388,8 @@ _MIGRATIONS: list[tuple[int, Migration]] = [
     (6, _apply_v6),
     (7, _apply_v7),
     (8, _apply_v8),
+    (9, _apply_v9),
+    (10, _apply_v10),
 ]
 
 

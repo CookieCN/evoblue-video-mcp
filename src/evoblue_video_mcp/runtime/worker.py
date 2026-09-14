@@ -10,8 +10,9 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp.jobs import TERMINAL_JOB_STATUSES, JobStatus
@@ -53,7 +54,24 @@ class ArtifactRecord:
     byte_size: int | None = None
 
 
-@dataclass(frozen=True)
+async def _apply_display_update(
+    sess: AsyncSession, job_id: str, outcome: "StageOutcome"
+) -> None:
+    """Persist stage-reported display columns inside the stage transaction.
+
+    The forward-quoted annotation and post-class definition keep this helper
+    valid regardless of import order; handlers never mutate the Job ORM
+    instance because the Core CAS commit paths (mark_failure/advance_job)
+    would not flush those dirty attributes.
+    """
+    if not outcome.display_update:
+        return
+    await sess.execute(
+        update(Job).where(Job.job_id == job_id).values(**outcome.display_update)
+    )
+
+
+@dataclass
 class StageOutcome:
     """Result of one stage: advance (with optional artifact) or fail."""
 
@@ -64,6 +82,11 @@ class StageOutcome:
     error_detail: str | None = None
     retryable: bool = False
     next_retry_at: float | None = None
+    # F3: identity/probe columns (title/platform/subtitle_probe) the stage
+    # wants persisted. Applied by the worker INSIDE the same write
+    # transaction as the status change — direct ORM mutation from a handler
+    # would not be flushed by the Core CAS paths (mark_failure/advance_job).
+    display_update: dict[str, Any] | None = None
 
     @classmethod
     def success(
@@ -71,8 +94,12 @@ class StageOutcome:
         target: JobStatus,
         progress: int | None = None,
         artifact: ArtifactRecord | None = None,
+        display_update: dict[str, Any] | None = None,
     ) -> "StageOutcome":
-        return cls(target=target, progress=progress, artifact=artifact)
+        return cls(
+            target=target, progress=progress, artifact=artifact,
+            display_update=display_update,
+        )
 
     @classmethod
     def transient(
@@ -80,17 +107,28 @@ class StageOutcome:
         error_code: str,
         next_retry_at: float | None = None,
         error_detail: str | None = None,
+        display_update: dict[str, Any] | None = None,
     ) -> "StageOutcome":
         return cls(
             error_code=error_code,
             error_detail=error_detail,
             retryable=True,
+            display_update=display_update,
             next_retry_at=next_retry_at,
         )
 
     @classmethod
-    def fatal(cls, error_code: str, error_detail: str | None = None) -> "StageOutcome":
-        return cls(error_code=error_code, error_detail=error_detail)
+    def fatal(
+        cls,
+        error_code: str,
+        error_detail: str | None = None,
+        display_update: dict[str, Any] | None = None,
+    ) -> "StageOutcome":
+        return cls(
+            error_code=error_code,
+            error_detail=error_detail,
+            display_update=display_update,
+        )
 
 
 @dataclass(frozen=True)
@@ -223,6 +261,7 @@ async def run_worker_once(
                     if next_retry_at is None and outcome.retryable:
                         next_retry_at = now() + DEFAULT_RETRY_DELAY
                     async with immediate_write_transaction(sess):
+                        await _apply_display_update(sess, job.job_id, outcome)
                         await mark_failure(
                             sess,
                             job_id=job.job_id,
@@ -237,6 +276,7 @@ async def run_worker_once(
 
                 if outcome.target is None:
                     async with immediate_write_transaction(sess):
+                        await _apply_display_update(sess, job.job_id, outcome)
                         await mark_failure(
                             sess,
                             job_id=job.job_id,
@@ -249,6 +289,7 @@ async def run_worker_once(
                     break
 
                 async with immediate_write_transaction(sess):
+                    await _apply_display_update(sess, job.job_id, outcome)
                     if outcome.artifact is not None:
                         job = await commit_artifact_and_advance(
                             sess,

@@ -38,7 +38,14 @@ def test_port_occupied_at_boot_exits_4_with_guidance(tmp_path: Path) -> None:
         proc = subprocess.run(
             [sys.executable, "-c", driver],
             capture_output=True,
-            text=True,
+            # The child env below deliberately strips encoding variables, so
+            # pin UTF-8 on BOTH sides: the child via PYTHONIOENCODING (it
+            # prints Chinese with the Windows locale codec otherwise) and the
+            # parent via an explicit encoding. With a UTF-8 shell
+            # (PYTHONUTF8=1) the default text=True reader crashed decoding
+            # cp936 bytes, silently turning proc.stderr into None.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
             env={
                 "EVOBLUE_DATA_DIRECTORY": str(tmp_path / "data"),
@@ -46,6 +53,7 @@ def test_port_occupied_at_boot_exits_4_with_guidance(tmp_path: Path) -> None:
                 "EVOBLUE_OPEN_UI": "0",
                 "PATH": "",
                 "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", ""),
+                "PYTHONIOENCODING": "utf-8",
             },
         )
         assert proc.returncode == singleton.EXIT_PORT_UNAVAILABLE

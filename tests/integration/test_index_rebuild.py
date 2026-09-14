@@ -1651,3 +1651,174 @@ async def test_settings_put_post_commit_failure_never_compensates(
     assert current is not None and current.report_directory == str(dir_b)
     assert read_report_pointer(data_dir) == dir_b
     assert list(data_dir.glob("report-root.txt.tmp*")) == []
+
+
+async def test_settings_put_cancel_on_commit_await_keeps_committed_pointer(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R10 (review round 4, P1): a cancellation landing on the commit's await
+    can still leave the write DURABLE — the transaction helper then keeps the
+    database value and propagates the cancel. The settings handler must
+    compensate by the REAL commit verdict: restoring the old pointer here
+    would split database (=new) and pointer (=old)."""
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    import evoblue_video_mcp.web.app as web_app_module
+    from evoblue_video_mcp.storage.rebuild import (
+        read_report_pointer,
+        write_report_pointer,
+    )
+    from evoblue_video_mcp.storage.repository import get_app_settings
+    from evoblue_video_mcp.web import create_app
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pointer_file = data_dir / "report-root.txt"
+    dir_a, dir_b = tmp_path / "reports-a", tmp_path / "reports-b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    async with session_factory() as sess:
+        await save_app_settings(
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
+        )
+    write_report_pointer(data_dir, dir_a)
+
+    orig_txn = web_app_module.immediate_write_transaction
+
+    @asynccontextmanager
+    async def cancel_after_durable_commit(
+        sess, *, on_commit=None  # type: ignore[no-untyped-def]
+    ):
+        if on_commit is None:
+            async with orig_txn(sess):
+                yield
+        else:
+            async with orig_txn(sess, on_commit=on_commit):  # type: ignore[call-arg]
+                yield
+        # the real commit has returned here — durable. Deliver the
+        # cancellation exactly as if it had landed on the commit await.
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        web_app_module, "immediate_write_transaction", cancel_after_durable_commit
+    )
+    app = create_app(
+        session_factory=session_factory,
+        report_pointer_file=pointer_file,
+        credential_store=_RunnableCredentials(),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.put("/api/settings", json={"report_directory": str(dir_b)})
+
+    # The commit was durable: BOTH stores must hold the NEW value — the
+    # handler must not "compensate" a pointer over a committed database.
+    async with session_factory() as sess:
+        current = await get_app_settings(sess)
+    assert current is not None and current.report_directory == str(dir_b)
+    assert read_report_pointer(data_dir) == dir_b, (
+        "the pointer was restored over a DURABLE commit — database and "
+        "recovery pointer split (R10 counterexample)"
+    )
+
+
+async def test_settings_put_pointer_failure_cleans_unadopted_key_slot(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11 (review round 4, P2): the report-pointer write fails AFTER the new
+    key was already confirmed in its fresh slot but BEFORE the database
+    transaction — the 503 must clean that unreferenced slot too; the database
+    binding and its old secret stay fully usable."""
+    import asyncio
+    import time
+
+    import evoblue_video_mcp.web.app as web_app_module
+    from evoblue_video_mcp.storage.rebuild import (
+        read_report_pointer,
+        write_report_pointer,
+    )
+    from evoblue_video_mcp.storage.repository import get_app_settings
+    from evoblue_video_mcp.web import create_app
+
+    class _MemoryCredentials:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        def get_secret(self, reference: str) -> str | None:
+            return self.values.get(reference)
+
+        def set_secret(self, reference: str, secret: str) -> None:
+            self.values[reference] = secret
+
+        def delete_secret(self, reference: str) -> None:
+            self.values.pop(reference, None)
+
+    async def _drain(predicate, timeout_s: float = 10.0) -> bool:  # type: ignore[no-untyped-def]
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            await asyncio.sleep(0.05)
+        return bool(predicate())
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pointer_file = data_dir / "report-root.txt"
+    dir_a, dir_b = tmp_path / "reports-a", tmp_path / "reports-b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    credentials = _MemoryCredentials()
+    credentials.values["llm:deepseek"] = "sk-old"
+    async with session_factory() as sess:
+        await save_app_settings(
+            sess,
+            setup_completed=True,
+            now=1000.0,
+            report_directory=str(dir_a),
+            **_RUNNABLE_LLM_KWARGS,
+        )
+    write_report_pointer(data_dir, dir_a)
+
+    def _broken(data_dir: Path, report_dir: Path | None) -> None:
+        raise OSError("simulated pointer write failure")
+
+    monkeypatch.setattr(web_app_module, "write_report_pointer", _broken)
+    app = create_app(
+        session_factory=session_factory,
+        report_pointer_file=pointer_file,
+        credential_store=credentials,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as client:
+        resp = await client.put(
+            "/api/settings",
+            json={"report_directory": str(dir_b), "llm_api_key": "sk-new"},
+        )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "report pointer could not be updated"
+
+    # the database never adopted anything: old binding + old secret intact
+    async with session_factory() as sess:
+        current = await get_app_settings(sess)
+    assert current is not None
+    assert current.report_directory == str(dir_a)
+    assert current.llm_credential_ref == "llm:deepseek"
+    assert credentials.get_secret(current.llm_credential_ref) == "sk-old"
+    assert read_report_pointer(data_dir) == dir_a
+    # the confirmed-but-unadopted fresh slot must be cleaned up
+    assert await _drain(lambda: "sk-new" not in credentials.values.values()), (
+        "the pointer failure bypassed the fresh-slot cleanup — an "
+        "unreferenced key lingers in the vault (R11 counterexample)"
+    )

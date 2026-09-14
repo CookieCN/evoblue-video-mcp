@@ -1,6 +1,6 @@
 {
   "project": "EvoBlue Video MCP",
-  "updated": "2026-09-08",
+  "updated": "2026-09-11",
   "modules": {
     "p0_foundation": {
       "name": "P0 Harness, contracts, and skeleton",
@@ -370,12 +370,53 @@
           "status": "done"
         }
       ]
+    },
+    "fix_first_feedback": {
+      "name": "First-user feedback fixes (docs/FIRST_USER_FEEDBACK_FIX_PLAN.md, baseline 0.9.0b5)",
+      "status": "in_progress",
+      "features": [
+        {
+          "id": "FF-0",
+          "name": "F0 evidence base + engine file log (docs/ENGINE_LOGGING.md)",
+          "status": "done"
+        },
+        {
+          "id": "FF-1",
+          "name": "F1 settings save & LLM diagnostics credibility (#4/#8/#12/#13/#14)",
+          "status": "done"
+        },
+        {
+          "id": "FF-2",
+          "name": "F2 frozen-package deps & Standard install (#1/#5/#7)",
+          "status": "done"
+        },
+        {
+          "id": "FF-3",
+          "name": "F3 subtitle attribution & job identity (#3/#9/#11/#16)",
+          "status": "done"
+        },
+        {
+          "id": "FF-4",
+          "name": "F4 restart recovery & full job listing (#15)",
+          "status": "done"
+        },
+        {
+          "id": "FF-5",
+          "name": "F5 download entry & model page copy (#2/#10)",
+          "status": "done"
+        },
+        {
+          "id": "FF-6",
+          "name": "F6 fix-package release gate (closed loop + from-zero download OK; review rounds 1-7 fixed with counterexample flips incl. versioned credential slots, verdict-aware pointer compensation, one-snapshot unified list endpoint, shared strict wire-level validation & segment-position invariants; remaining external gap: Bilibili public-CC sample needs cookie env)",
+          "status": "in_progress"
+        }
+      ]
     }
   },
   "summary": {
-    "done": 62,
-    "in_progress": 0,
+    "done": 68,
+    "in_progress": 1,
     "planned": 0,
-    "completion_pct": 100.0
+    "completion_pct": 98.6
   }
 }

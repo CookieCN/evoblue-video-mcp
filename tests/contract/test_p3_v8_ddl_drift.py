@@ -30,5 +30,7 @@ def test_v8_statements_match_contract_character_for_character() -> None:
     assert [statement.strip() for statement in _V8_STATEMENTS] == _contract_ddl_blocks()
 
 
-def test_schema_version_is_8() -> None:
-    assert SCHEMA_VERSION == 8
+def test_schema_version_is_current() -> None:
+    # v9 (F3) added jobs.title/platform/subtitle_probe projections;
+    # v10 (R1b) added app_settings.llm_credential_origin
+    assert SCHEMA_VERSION == 10

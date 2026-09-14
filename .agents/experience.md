@@ -279,3 +279,58 @@
 **Solution**：数据删除确认改为 `SuppressibleMsgBox(..., IDNO)`，信息提示改为 `SuppressibleMsgBox(..., IDOK)`；新增合同测试禁止重新出现 `if MsgBox(`。
 
 **Rule**：任何需要支持无人值守安装/卸载的 Inno `[Code]` 对话框只能用 Suppressible 变体，并显式传入故障安全默认值；“默认按钮”不等于“静默默认返回值”。
+
+## 30. uvicorn 0.34 的 log_config 不吃 callable；默认 LOGGING_CONFIG 没有 root 条目
+
+F0 接 Engine 文件日志时实测：`uvicorn.Config.configure_logging` 只认 dict/JSON/YAML 文件路径，其余一切（含 callable）走 `logging.config.fileConfig` → configparser 直接 TypeError。且其默认 `LOGGING_CONFIG` 的 loggers 里没有 `root`——dictConfig 不会覆盖 root 上已挂的 handler，但 `uvicorn`/`uvicorn.access` 的 handlers 列表会被整体替换。正确姿势：深拷贝默认配置后把自己的 handler 追加进两个 logger 的列表，handler 用 `{{"()": 返回既有实例的工厂}}` 引用同一个对象——两个 RotatingFileHandler 实例写同一文件时，任一实例轮转改名都会被另一实例的打开句柄卡死（Windows 改名对任何打开句柄都失败）。（docs/ENGINE_LOGGING.md §3，2026-09-10）
+
+## 31. web.app 不得 import runtime 子模块（循环导入），新基础模块放包顶层
+
+`runtime/__init__.py` 末尾 re-export `bootstrap.create_runtime_app`，而 bootstrap 又 import `web.app`。任何 `web.app → evoblue_video_mcp.runtime.*` 的 import 都会先执行 runtime 包 __init__ → bootstrap → 回到未初始化完的 web.app，全量收集即炸 ImportError。诊断导出需要日志常量时，模块必须放包顶层（`evoblue_video_mcp/engine_logging.py`），只触发轻量的包 __init__。（2026-09-10）
+
+## 32. 测试里 spawn 剥净 env 的子进程必须两端钉死编码
+
+FI-1（端口占用退出码）的子进程 env 只留 EVOBLUE_*/PATH/SYSTEMROOT：shell 设了 `PYTHONUTF8=1` 时父进程按 UTF-8 解码，子进程按 Windows locale（cp936）写中文 stderr → reader 线程 UnicodeDecodeError 崩溃，`proc.stderr` 变 None、断言 TypeError——且这是预存缺陷，与业务改动无关，极易误判为新引入回归（先 stash 对照 HEAD 再定性）。修法：子进程 env 钉 `PYTHONIOENCODING=utf-8`，父进程 `subprocess.run(encoding="utf-8", errors="replace")`。（2026-09-10）
+
+## 33. App.test.jsx 的 mockFetchRouter 路由匹配语义是「位置靠右优先」
+
+测试路由表里既有前缀式 key（`/api/settings` vs `/api/settings/test`）也有后缀式 key（`/codex/install` 挂在 `/api/mcp-clients` 之下）。原 comparator 是 `url.indexOf(b) - url.indexOf(a)`（靠右=更具体），改成长度优先会错杀后缀式 key（MCP 页 4 个测试齐挂）。需要前缀消歧时用 `indexOf 降序 || 长度降序` 组合，别替换原语义。（2026-09-10）
+
+## 34. 归档模型 manifest 钉值必须枚举归档全部文件成员，合成归档单测测不出
+
+Standard 真实归档 10 个文件（含 README/LICENSE/export-onnx.py/test_wavs×5），manifest 只声明 2 个；Lite 6 声明 3。源码单测全绿是因为测试归档是手工构造的「干净」形态。钉值流程必须用脚本从真实归档枚举全部成员生成（并核对 sum(files)==installed_size），测试侧用名称集合锁定白名单（test_model_manifests.py::test_archive_whitelists_cover_every_pinned_archive_member）。（2026-09-11，反馈 #7）
+
+## 35. 杀软啃食 venv 包后 dist-info 残留会骗过 uv sync
+
+Windows Defender 吃掉 cryptography 的 __init__.py/_rust.pyd 但留下 dist-info → `uv sync` 认为包完整不重装、`importlib.metadata` 探测失败、PyInstaller hook 崩（get_module_file_attribute 返回 None）。处置：删掉残包目录+dist-info 后 `uv pip install --no-deps` 重装；重装时若报 .pyd 拒绝访问，先看是否有python 进程（含本会话 MCP 服务）锁着它，绕开被锁的无关包只装坏包。（2026-09-11）
+
+## 36. PyInstaller 在独立 package extras，uv sync 漏参会静默卸载它
+
+pyproject 的 dev/asr/package 是三个 extras；`uv sync --extra dev --extra asr` 会把手动装的 PyInstaller卸掉（输出里的 `- pyinstaller` 一闪而过），构建脚本才报 No module named PyInstaller。构建前同步命令固定为`uv sync --extra dev --extra asr --extra package`。（2026-09-11）
+
+## 37. handler 里直接改 Job ORM 脏属性不会经 Core CAS 提交路径落库
+
+worker 的 mark_failure/advance_job 用 Core UPDATE（CAS on lease），不 flush ORM 实例的脏属性；只有 commit_artifact_and_advance 的 ORM 路径会。F3 的 title/subtitle_probe 首版直接 `job.title = ...` 在三个失败/回退分支全部静默丢失（成功分支碰巧落库，极具迷惑性）。正解：StageOutcome.display_update 携带展示列，worker 在三个提交事务（transient/fatal/advance）开头统一 `update(Job).values(**…)` 应用；且 handler 内绝不能自己开写事务（会抢在 BEGIN IMMEDIATE 之前 autobegin deferred，违反 Gotcha #5 纪律）。（2026-09-11）
+
+38. 测试里用裸 `session.execute(update(...))` 造特殊行状态后**必须立刻 `await sess.commit()`**：不提交则（a）后续新开的 session 看不到该状态，(b) 同一测试 session 里下一个仓储写函数会因带未提交 DML 被 `_begin_immediate` 的 authorizer 守卫拒绝（Gotcha #5 纪律的测试侧镜像）。F4 重启矩阵测试首轮三个失败全部源于此，而非被测代码。
+
+39. Windows 验收脚本捕获引擎子进程中文 stderr 时**不要用 text=True 单边钉编码**：父 shell 的默认文本编码（UTF-8 模式）与子进程实际输出（ANSI 码页）是两个独立变量，单边假设会在另一种环境下崩 reader 线程（stderr=None）或断言乱码。密闭做法：`capture_output=True` 收字节，decode 先试 UTF-8 再回退 `GetACP()` 码页（F6 P7 验收脚本两轮翻车后定型，Gotcha #8「环境敏感断言密闭化」的编码实例）。
+
+40. `asyncio.wait_for` 超时会**取消**被等待的 future——对排队中的 `run_in_executor` 操作是静默取消（永不执行）。串行化后台操作想保住「超时=未决、仍会执行」语义必须 `asyncio.shield` 包一层；不 shield 时测试会以「最终值停在旧 Key」而非报错的形式暴露（F6 评审 R2 自踩）。另：测这种时序前先**成功播种一次保存**再进阻塞序列——首个 503 请求的设置行未落库，后续请求拿不到 Provider 上下文，ref 漂移成空串，测试假红。
+41. `expire_on_commit=False` 的 Session 里，`select(Job).where(...)` 命中 identity map 时返回**缓存实例不刷新属性**——「事务内读到的就是最新值」对 ORM 实体查询不成立。需要锁内权威值的字段（如取消标记）必须用**列 SELECT**（`select(Job.col)`）绕过实例缓存（F6 评审 R3 根因）。
+
+42. Git Bash heredoc 传输多层转义不可靠（反斜杠被逐层吃掉、内容随机截断、EOF 提前终结）：含反斜杠或多层引号的 Python 代码写入文件必须用 Write/Edit 工具直写；LIKE ESCAPE 子句这类反斜杠敏感代码尤其如此（本轮三次返工的根因）。heredoc 只用于无转义风险的纯文本。
+
+43. keyring 这类按名字寻址的凭据库，**禁止原地覆盖数据库仍引用的槽**：写入与 SQLite 提交之间的任何失败（提交异常、或超时后迟到落盘的写）都会让旧绑定静默指向新 Key——正确形态是每次写入全新唯一槽名 + prepare→commit→cleanup（数据库提交是唯一切换点，提交成功后才清理被替换槽）；删除反向（先 DB 解绑后清槽）。特别注意取消路径上不能清理新槽：Gotcha #5 的 shield 语义下，取消可以落在 commit await 之后而 SQLite 已采纳新引用，此时删槽破坏的是刚采纳的绑定（宁可漏垃圾不可删错）。fire-and-forget 清理排在同一串行队列里，天然晚于在途写（三轮评审 R5）。
+
+44. 双数据源合成分页（任务表 + 报告索引）想做到「无重复无漏数」，**页内去重救不了跨页**：同一 job 在两源合法共存（索引先提交、job 状态后推进）时，只有把不相交条件下推到服务端查询（历史段排除非 completed job 的报告）+ 每页都取两段精确 total（满页时发 limit=1 计数探测），全局 offset 映射才闭合。另外跨请求分页要求两端点 ORDER BY 都带唯一键决胜，否则时间戳并列的行会在两次请求间漂移（三轮评审 R6/R7）。
+
+45. 「两个端点各查一段再拼页」在并发写下没有一致性可言——job 状态推进（indexing→completed）落在两次请求之间，任务行已返回而报告新近合格入段，同 job 双现。要一致就**一个读事务一个快照**：首个 SELECT 钉住 WAL 快照后，同事务内后续 SELECT 全部不可见并发提交。反例注入技巧：monkeypatch 第二段查询函数，在其中用独立 session 提交状态翻转再委托原函数——快照性质直接由测试锁死。翻转验证时注意 commit 插入位置：jobs 页查询会重新 autobegin 钉新快照，模拟「两快照」必须把 commit 放在 jobs 读取之后、history 读取之前（四轮评审 R9）。
+
+46. 取消可以落在 commit 的 await 上而 SQLite 已持久化（Gotcha #5 的 shield 语义）——此时异常处理器里的「取消 ⇒ 未提交」假设不成立，按异常类型补偿会制造库/指针分裂。正确做法是让事务协调层交出明确的 **committed verdict**（同步回调，durable 两条路径都触发），补偿按 verdict 分支：已提交→不补偿指针、清理被替换资源；未提交→补偿。另：把「先写资源 A 再提交库」的 A 段放进同一个 try，所有失败出口（含 HTTPException 直通重抛）统一过清理，否则 A 段失败会绕过清理留下无人引用的资源（四轮评审 R10/R11）。
+
+47. 对引擎返回的 200 载荷做**宽松默认**（缺失字段 → 空集合/0）会把版本偏差伪装成「成功空页」——整类数据静默消失比报错危险得多；item 转换里的 KeyError 还会绕过信封校验层升级成协议错误。正确形态：先严格验证必填字段与判别字段，转换异常统一映射为专用异常 → 冻结信封降级（BRIDGE_INTERNAL，isError=false），日志只记工具名不记内容。另：有了显式 commit verdict 后，「取消 ⇒ 不确定是否提交」的保守假设就该退役——verdict=false 是证明不是猜测，未采纳资源可安全清理（五轮评审 R12/R13）。
+
+48. 给某个视图加了严格校验后，**检查同族入口是否都盖住了**——第五轮只修默认视图，显式状态视图仍宽松默认，第六轮同样问题再犯一次才补齐三源共用边界。同类教训：单点不变量（如 total）往往被多重检查冗余锁定，翻转验证时只翻一处可能不转红，要用测试期望的具体反例（如状态归属）验证翻转是否真的命中目标检查。
+
+49. 「严格验证」若靠 `str(raw[...])`/`int(raw[...])` 投影实现，其实是在**替对端修数据**——数字 job_id、布尔 progress、列表 title 都被静默改写成合法值。正确形态是 wire 层 Pydantic strict 模型（镜像对端 REST schema、extra=ignore 容忍未来字段）验证后再投影，且投影层自身越界（如 REST 无上限但 MCP 有 le=100 的字段）也要包进同一降级边界。另两条实测坑：①Python `True == 1`，等值回显比较必须显式拒绝 bool；②畸形夹具必须「其余字段完全合法、只变被测字段」，否则夹具在上游检查提前失败，测试注释声称的路径根本没执行（七轮评审 R16）。

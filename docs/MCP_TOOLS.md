@@ -127,6 +127,12 @@
 
 - 错误：`JOB_NOT_FOUND`、`ENGINE_TIMEOUT`。
 - 字段语义：`stage` 是 ≤32 字符的管线阶段名（自由字符串，如 `summarizing_chunks`），不是任务状态枚举，可为 `null`；`message` 由 Bridge 按当前状态合成的人类可读文本，Engine 不提供该字段。
+- **阻塞原因（F3，2026-09-11，反馈 #3/#9）**：`queued`（初始设置未完成 / Key 缺失 / 凭据库不可读）与
+  `waiting_for_model` 状态下，Engine 的 `/api/jobs/{id}` 附带 `blocked_reason`（稳定串：
+  `setup_incomplete` / `llm_key_unavailable` / `keyring_error` / `waiting_for_model`）与
+  `blocked_message`（Engine 侧合成的完整指引，含**实际 Engine 地址**、绝不携带 token）；
+  Bridge 的 `message` 优先透传 `blocked_message`。判定与 Worker 领取门禁同源（settings 行 +
+  有界 keyring 存在性），不做网络探测，预算不变。
 - 幂等性：相同时间点读取无副作用；状态可能随 Worker 前进。
 - 只读：是。
 - 超时：5 秒；超时不改变 Job。
@@ -185,8 +191,9 @@
 ```
 
 - 错误：`INVALID_FILTER`、`ENGINE_TIMEOUT`。
-- 数据源合并（P4 冻结）：运行中（非终态）任务来自 `/api/jobs`，已完成历史来自 `/api/history`；运行中条目排在前（按提交时间降序），已按 `job_id` 去重（同一任务两侧都出现时运行中条目胜出）。运行中条目的 `title`/`platform` 为 `null`（任务表无此维度）；`platform` 与 `query` 过滤只作用于历史源。
-- `query` 为历史标题的大小写不敏感子串匹配。`status` 过滤下推到 `/api/jobs` 的服务端过滤；历史源视为 `completed`，仅当 `status` 为 `null` 或 `completed` 时纳入。`total` = 运行中条数 + 历史总条数（过滤后口径）。
+- 数据源合并（P4 冻结；F3 修订 2026-09-11；F4 修订 2026-09-11；R6/R7 三轮修订 2026-09-14）：运行中（非终态）任务与 `failed`/`cancelled` 终态任务来自 `/api/jobs`，已完成历史来自 `/api/history`。默认（`status=null`）排序：运行中条目在前（按提交时间降序，`id` 唯一决胜）→ 任务表中的 `failed`/`cancelled` 行（SQL 先按 active/terminal 分组再按时间排序——更新的失败任务不得越过更旧的运行中任务，R7）→ 报告历史条目（`analyzed_at` 降序、`id` 决胜）。两段集合**服务端严格不相交**（R6；R9 四轮修订：不相交判定与两段读取位于同一 SQLite 快照——`/api/jobs/unified` 的历史段查询携带 `exclude_unfinished_jobs=true`，排除所有 job 行非 `completed` 的报告）：同一任务的报告已入索引但任务行尚未推进到 `completed`（索引提交与 worker 下一笔事务之间失败）时由任务行唯一代表（任务行胜出），跨段/跨页不会重复，并发提交亦然。任务条目的 `title`/`platform` 自元数据阶段成功起由任务行携带（迁移 v9 投影列；元数据未到达时为 `null`，`url` 是回退辨识）；`platform` 与 `query` 过滤同时作用于两个数据源（`platform` 两端点均不区分大小写，R8），`query` 无 title 时回退匹配 `url`。
+- `query` 为历史标题的大小写不敏感子串匹配。`status` 过滤下推到 `/api/jobs` 的服务端过滤（评审 R4 修订 2026-09-11；R4b 二轮修订 2026-09-12）：`completed` 视为报告历史源单源查询（`/api/history` 的 `limit`/`offset`/`platform`/`query` 全部下推）；其余任意状态值（含 `failed`/`cancelled` 与各运行态）为任务源单源查询，**`limit`/`offset`/`platform`/`query` 全部下推**——引擎对同一过滤集合分页与计数，条目原样透传（不要求"运行中"、不二次切片），`total` 为服务端精确计数。默认视图（R4b 修订；R6 三轮修订 2026-09-14；**R9 四轮修订 2026-09-14**）：**单请求统一查询**——Bridge 调用 `GET /api/jobs/unified`（`limit`/`offset`/`platform`/`query` 下推），引擎在**同一个 SQLite 读事务（单一快照）**内完成两段计数、非完成任务排除、排序与切片：两个请求的设计里 worker 可在两次读取之间提交任务完成（任务行已返回、报告新近入段），同一任务重复且 total 双计；单一快照下整个回答（counts、排除、排序、切片）内在一致。无固定取数上限、任何 offset 不返回空窗；**`total` = 任务段总数 + 历史段总数，每页均为精确值**（两段在同一快照内严格不相交，任务行胜出）。`platform`（不区分大小写精确）与 `query`（title/url 子串，url 为元数据未到时的回退）统一服务端过滤并计入两段 total。
+- 畸形载荷（R13 五轮修订 2026-09-14；R14/R15 六轮修订扩展到全部三个数据源与跨字段不变量）：三个列表数据源（jobs 单源 / history 单源 / unified）共用同一严格验证边界，每行先经 **wire 层严格模型**（Pydantic strict 模式，镜像引擎 REST schema：类型精确匹配、不转换错误类型、必填字段齐全——jobs 行 progress/created_at 必填、history 行完整 HistoryItem 字段、unified 行 progress 必填；未知新增字段忽略以容忍未来引擎）再投影到 MCP schema（投影越界如同降级）：200 响应缺失必填字段、字段类型错误（数字 job_id、布尔 progress、列表 title、`limit/offset` 回显为布尔——Python `True == 1`）、item 非 object、状态与请求过滤或段归属不符、窗口回显不一致、页容量与 min(limit, total-offset) 不符、total ≠ jobs_total + history_total、或**行位置与全局分段不符**（global_index=offset+index < jobs_total 必为 job、否则必为 history——totals 正确不能证明切片有序），一律降级 `ok:false / BRIDGE_INTERNAL`（isError=false）——绝不伪装成功空页，不纠正或忽略引擎的错误数据，也不升级为协议级错误。
 - 幂等性：只读快照。
 - 只读：是。
 - 超时：10 秒；固定最大页长 100。
@@ -273,7 +280,7 @@
 
 检查名冻结枚举（P4；顺序即输出顺序；P8 追加只增不改）：`local_engine`、`engine_version`、`database`、`report_directory`、`disk_space`、`ffmpeg`、`yt_dlp`、`llm_config`、`llm_api`、`asr_runtime`、`gpu`、`asr_models`、`cookie_browser`、`worker_runtime`。
 
-- `asr_runtime` 覆盖本地推理运行时（sherpa-onnx + onnxruntime）与 Provider 注册状态；`asr_models` 覆盖已安装模型与激活状态；`llm_api` 仅在 `include_network=true` 时执行，否则 `skipped`。
+- `asr_runtime` 覆盖本地推理运行时（sherpa-onnx + onnxruntime）与 Provider 注册状态；`asr_models` 覆盖已安装模型与激活状态；`llm_api` 仅在 `include_network=true` 时执行，否则 `skipped`。探测按 settings 凭据引用携带 Bearer 认证（与实际生成调用同规则，F1 2026-09-10）：2xx 报可达且认证有效、401/403 报认证失败（detail=`auth_failed`）、凭据库不可读报 `keyring_error` 且不探测；Key 值不出现在任何输出。
 
 - 错误：单项失败进入 checks，不应让整个工具失败；只有 Engine 无法提供诊断时返回通用错误。
 - 幂等性：逻辑只读，但可能访问网络/读取系统能力；不得下载、安装或修改配置。

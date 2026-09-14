@@ -1,110 +1,313 @@
-"""Two-source merge for ``list_analysis_jobs`` (MCP_TOOLS §4, ADR 0004).
+"""Server-paged page builders for ``list_analysis_jobs`` (MCP_TOOLS §4, ADR 0004).
 
-Running (non-terminal) jobs come from ``/api/jobs``; completed history comes
-from ``/api/history``. Active entries lead, ``job_id`` dedup favors the active
-entry, and ``platform``/``query`` only filter the history source (the Job
-table has no platform/title dimension). Pure functions over parsed REST bodies
-so unit tests need no HTTP at all.
+R4b-R9 (review rounds 2-4): every view is a PUSHED-DOWN server query — the
+engine pages and counts the same filtered collection, so no row is unreachable
+and no fixed fetch cap exists:
+  - explicit non-completed status: one /api/jobs query (status + filters +
+    limit/offset pushed); terminal rows pass through with error_code/url.
+  - completed: one /api/history query (filters + limit/offset pushed).
+  - default: ONE /api/jobs/unified request — both segment counts, the
+    unfinished-job exclusion, the ordering, and the page slice come from a
+    single SQLite snapshot (``unified_page``).
+
+R13-R17 (review rounds 5-7): ALL three sources share ONE strict validation
+boundary, and every item is validated against a WIRE-LEVEL model mirroring
+the engine's REST schema (Pydantic strict mode — no type coercion, unknown
+future fields ignored) BEFORE being projected to the MCP output schema.
+Violations — missing/wrong-typed required fields, a non-object item, a
+window that does not echo the request, an impossible page capacity,
+inconsistent segment counts, a row outside its segment or in the wrong
+segment POSITION — raise :class:`EngineListFormatError`; the bridge degrades
+to ``ok:false / BRIDGE_INTERNAL`` (isError=false). Lenient defaults and
+silent coercion are forbidden on purpose: they masquerade version skew and
+engine bugs as "no data" or as fixed-up rows. Pure functions over parsed
+REST bodies so unit tests need no HTTP at all.
 """
 
-from typing import Any
+from typing import Any, TypeVar
 
-from evoblue_video_mcp.jobs import ACTIVE_JOB_STATUSES, JobStatus
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.mcp.schemas import AnalysisJobListItem, ListAnalysisJobsOutput
 
-_ACTIVE_STATUS_VALUES = frozenset(status.value for status in ACTIVE_JOB_STATUSES)
-
-#: Page cap for each source fetch; the merged output page is sliced locally.
-#: A single-user local Engine is comfortably inside this (frozen max page 100).
-_SOURCE_FETCH_LIMIT = 100
+_WireModelT = TypeVar("_WireModelT", bound="_WireModel")
 
 
-def _is_active(status_value: str) -> bool:
-    return status_value in _ACTIVE_STATUS_VALUES
+class EngineListFormatError(ValueError):
+    """An engine list-page body violates the frozen contract (version skew
+    or an engine bug) — the bridge must degrade to ``BRIDGE_INTERNAL``,
+    never answer a fake empty page nor raise a protocol-level error."""
 
 
-def _active_item(raw: dict[str, Any]) -> AnalysisJobListItem:
-    progress = raw.get("progress")
-    return AnalysisJobListItem(
-        job_id=str(raw["job_id"]),
-        title=None,
-        platform=None,
-        status=JobStatus(str(raw["status"])),
-        progress=int(progress) if isinstance(progress, (int, float)) else None,
-    )
+class _WireModel(BaseModel):
+    """Strict wire validation: exact types only, unknown fields ignored.
+
+    ``strict=True`` forbids every coercion (int stays int, str stays str,
+    bool is not an int); ``extra="ignore"`` tolerates fields a FUTURE engine
+    adds without breaking an older bridge — version skew only degrades on
+    genuinely invalid payloads.
+    """
+
+    model_config = ConfigDict(extra="ignore", strict=True)
 
 
-def _history_item(raw: dict[str, Any]) -> AnalysisJobListItem:
-    return AnalysisJobListItem(
-        job_id=str(raw["job_id"]),
-        title=str(raw["title"]) if raw.get("title") else None,
-        platform=str(raw["platform"]) if raw.get("platform") else None,
-        status=JobStatus.COMPLETED,
-        progress=100,
-    )
+class _WireJobRow(_WireModel):
+    """Mirrors ``web.schemas.JobListItem`` (the /api/jobs item)."""
+
+    job_id: str
+    status: str
+    progress: int = Field(ge=0)
+    created_at: float
+    stage: str | None = None
+    error_code: str | None = None
+    title: str | None = None
+    platform: str | None = None
+    url: str | None = None
 
 
-def _history_passes_filters(
-    raw: dict[str, Any], *, platform: str | None, query: str | None
-) -> bool:
-    if platform is not None and str(raw.get("platform") or "").lower() != platform.lower():
-        return False
-    if query is not None:
-        title = str(raw.get("title") or "")
-        if query.lower() not in title.lower():
-            return False
-    return True
+class _WireHistoryRow(_WireModel):
+    """Mirrors ``web.schemas.HistoryItem`` (the /api/history item)."""
+
+    job_id: str
+    analysis_id: str
+    title: str
+    platform: str
+    author: str
+    video_id: str
+    source_url: str
+    published_at: float | None = None
+    analyzed_at: float
+    language: str
+    summary_mode: str
+    asr_provider: str
+    asr_model: str
+    asr_model_version: str
+    tags: list[str]
+    summary_preview: str
+    file_path: str
+    content_hash: str
+    doc_status: str
+    indexed_at: float
 
 
-def merge_job_pages(
+class _WireUnifiedRow(_WireModel):
+    """Mirrors ``web.schemas.UnifiedJobListItem`` (the /api/jobs/unified
+    item — the slim unified projection, not the full HistoryItem)."""
+
+    kind: str
+    job_id: str
+    status: str
+    progress: int = Field(ge=0)
+    stage: str | None = None
+    error_code: str | None = None
+    created_at: float | None = None
+    title: str | None = None
+    platform: str | None = None
+    url: str | None = None
+
+
+def _wire(model: type[_WireModelT], raw: Any) -> _WireModelT:
+    """Validate one wire row; any violation is a contract error."""
+    try:
+        return model.model_validate(raw)
+    except ValidationError as exc:
+        raise EngineListFormatError(
+            "engine list item failed wire validation"
+        ) from exc
+
+
+def _mcp_job(wire: _WireJobRow | _WireUnifiedRow) -> AnalysisJobListItem:
+    try:
+        status = JobStatus(wire.status)
+    except ValueError as exc:
+        raise EngineListFormatError("engine list item has an unknown status") from exc
+    try:
+        return AnalysisJobListItem(
+            job_id=wire.job_id,
+            title=wire.title,
+            platform=wire.platform,
+            status=status,
+            progress=wire.progress,
+            error_code=wire.error_code,
+            url=wire.url,
+        )
+    except ValidationError as exc:
+        # wire-legal but MCP-illegal values (e.g. progress>100: the REST
+        # contract caps at >=0, the MCP output at 100) stay inside the
+        # boundary — they degrade, never escape as a protocol error.
+        raise EngineListFormatError(
+            "engine list item failed MCP projection"
+        ) from exc
+
+
+def _mcp_history_item(
+    job_id: str,
+    title: str | None,
+    platform: str | None,
+    url: str | None,
+) -> AnalysisJobListItem:
+    try:
+        return AnalysisJobListItem(
+            job_id=job_id,
+            title=title,
+            platform=platform,
+            status=JobStatus.COMPLETED,
+            progress=100,
+            url=url,
+        )
+    except ValidationError as exc:
+        raise EngineListFormatError(
+            "engine list item failed MCP projection"
+        ) from exc
+
+
+def _strict_window(
+    body: dict[str, Any], *, limit: int, offset: int
+) -> tuple[list[Any], int]:
+    """Validate the page-window contract shared by every engine list source.
+
+    Required: ``items`` list, non-negative int ``total``, and a window that
+    echoes the request (``limit``/``offset`` — bools rejected explicitly,
+    Python's ``True == 1`` would otherwise slip through the equality). The
+    page capacity must be exact: a well-formed engine returns
+    ``min(limit, max(0, total-offset))`` rows — an empty FIRST page with a
+    positive total, or an over-capacity page, is a contract violation.
+    """
+    if not isinstance(body, dict):
+        raise EngineListFormatError("engine list body is not an object")
+    raw_items = body.get("items")
+    total = body.get("total")
+    if (
+        not isinstance(raw_items, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+    ):
+        raise EngineListFormatError("engine list body missing items/total")
+    resp_limit = body.get("limit")
+    resp_offset = body.get("offset")
+    if (
+        not isinstance(resp_limit, int)
+        or isinstance(resp_limit, bool)
+        or not isinstance(resp_offset, int)
+        or isinstance(resp_offset, bool)
+        or resp_limit != limit
+        or resp_offset != offset
+    ):
+        raise EngineListFormatError("engine list window does not echo the request")
+    expected_rows = min(limit, max(0, total - offset))
+    if len(raw_items) != expected_rows:
+        raise EngineListFormatError("engine list page capacity is inconsistent")
+    return raw_items, total
+
+
+def single_source_page(
     jobs_body: dict[str, Any],
+    *,
+    status: str,
+    limit: int,
+    offset: int,
+) -> ListAnalysisJobsOutput:
+    """Explicit non-completed status: the engine-queried page passes through.
+
+    The server already applied status/platform/query/limit/offset, so the
+    body IS the requested page and its ``total`` counts the same filtered
+    collection (R4). R14/R16: strict window + wire-level item validation; an
+    item whose status does not match the requested filter is a violation,
+    not a row to silently drop.
+    """
+    raw_items, total = _strict_window(jobs_body, limit=limit, offset=offset)
+    page_items: list[AnalysisJobListItem] = []
+    for raw in raw_items:
+        item = _mcp_job(_wire(_WireJobRow, raw))
+        if item.status.value != status:
+            raise EngineListFormatError(
+                "engine list item status does not match the requested filter"
+            )
+        page_items.append(item)
+    return ListAnalysisJobsOutput(
+        items=page_items, limit=limit, offset=offset, total=total
+    )
+
+
+def completed_page(
     history_body: dict[str, Any],
     *,
     limit: int,
     offset: int,
-    status: str | None,
-    platform: str | None,
-    query: str | None,
 ) -> ListAnalysisJobsOutput:
-    """Merge one ``/api/jobs`` page and one ``/api/history`` page.
+    """status=completed: the report-history endpoint is the whole answer,
+    paged and counted server-side (R4b — row 5001 is one request away).
+    R14/R16: strict window + the FULL HistoryItem wire contract per row."""
+    raw_items, total = _strict_window(history_body, limit=limit, offset=offset)
+    page_items = [
+        _mcp_history_item(w.job_id, w.title, w.platform, w.source_url)
+        for w in (_wire(_WireHistoryRow, raw) for raw in raw_items)
+    ]
+    return ListAnalysisJobsOutput(
+        items=page_items, limit=limit, offset=offset, total=total
+    )
 
-    ``status`` filtering is pushed down to ``/api/jobs`` server-side; the
-    history source counts as ``completed`` and is included only when the
-    filter is ``None`` or ``completed``.
+
+def unified_page(
+    body: dict[str, Any],
+    *,
+    limit: int,
+    offset: int,
+) -> ListAnalysisJobsOutput:
+    """Default view (R9, review round 4): the unified endpoint's page passes
+    through — the engine answered counts, exclusion, ordering, and slicing
+    from ONE SQLite snapshot, so ``total`` is exact on every page and the
+    same job can never appear in both segments.
+
+    R15/R17 (review rounds 6-7): the FULL response contract is validated —
+    segment counts are required and must sum to ``total``; every row's kind
+    must match its GLOBAL position (``offset + index < jobs_total`` is a job
+    row, beyond it a history row — correct totals alone do not prove the
+    slice is ordered); job rows may not be completed (completed jobs live in
+    the history segment); history rows must present as completed. Any
+    violation degrades to ``BRIDGE_INTERNAL`` instead of correcting or
+    ignoring engine data.
     """
-    active_raw = [
-        item
-        for item in jobs_body.get("items", [])
-        if isinstance(item, dict) and _is_active(str(item.get("status")))
-    ]
-    include_history = status is None or status == JobStatus.COMPLETED
-    history_raw = [
-        item
-        for item in history_body.get("items", [])
-        if isinstance(item, dict) and include_history
-    ]
-    history_raw = [
-        item
-        for item in history_raw
-        if _history_passes_filters(item, platform=platform, query=query)
-    ]
-
-    active_items = [_active_item(item) for item in active_raw]
-    history_items = [_history_item(item) for item in history_raw]
-
-    active_ids = {item.job_id for item in active_items}
-    deduped_history = [item for item in history_items if item.job_id not in active_ids]
-    merged = active_items + deduped_history
-
-    if query is None:
-        # history_body["total"] covers records beyond the fetched page; the
-        # dedup subtraction only knows about the overlap actually fetched.
-        total = len(active_items) + int(history_body.get("total") or 0) - (
-            len(history_items) - len(deduped_history)
-        )
-    else:
-        # Query filtering happened locally over the fetched page only.
-        total = len(merged)
-
-    page = merged[offset : offset + limit]
-    return ListAnalysisJobsOutput(items=page, limit=limit, offset=offset, total=total)
+    raw_items, total = _strict_window(body, limit=limit, offset=offset)
+    jobs_total = body.get("jobs_total")
+    history_total = body.get("history_total")
+    for segment_total in (jobs_total, history_total):
+        if (
+            not isinstance(segment_total, int)
+            or isinstance(segment_total, bool)
+            or segment_total < 0
+        ):
+            raise EngineListFormatError("unified list body missing segment totals")
+    if not isinstance(jobs_total, int) or not isinstance(history_total, int):
+        raise EngineListFormatError("unified list body missing segment totals")
+    if total != jobs_total + history_total:
+        raise EngineListFormatError("unified total does not equal the segment sums")
+    page_items: list[AnalysisJobListItem] = []
+    for index, raw in enumerate(raw_items):
+        wire = _wire(_WireUnifiedRow, raw)
+        expected_kind = "job" if offset + index < jobs_total else "history"
+        if wire.kind != expected_kind:
+            raise EngineListFormatError(
+                "unified row sits outside its segment position "
+                f"(global index {offset + index}, expected {expected_kind})"
+            )
+        if wire.kind == "history":
+            if wire.status != JobStatus.COMPLETED.value:
+                raise EngineListFormatError(
+                    "unified history item must present as completed"
+                )
+            page_items.append(
+                _mcp_history_item(wire.job_id, wire.title, wire.platform, wire.url)
+            )
+        else:
+            item = _mcp_job(wire)
+            if item.status == JobStatus.COMPLETED:
+                raise EngineListFormatError(
+                    "unified job segment must not contain completed jobs"
+                )
+            page_items.append(item)
+    return ListAnalysisJobsOutput(
+        items=page_items, limit=limit, offset=offset, total=total
+    )

@@ -342,6 +342,37 @@ def test_install_archive_allows_single_root(tmp_path) -> None:
     assert (dest / "model.int8.onnx").read_bytes() == model
 
 
+def test_install_archive_allows_declared_nested_paths(tmp_path) -> None:
+    """F2 (#7): real upstream archives ship test_wavs/ next to the weights —
+    a whitelisted nested member must land at the same relative path."""
+    wav = b"wav-bytes"
+    model = b"model-weights"
+    archive = tmp_path / "m.tar.bz2"
+    _write_tar(
+        archive, {"root/test_wavs/zh.wav": wav, "root/model.int8.onnx": model}
+    )
+    files = [
+        {"name": "test_wavs/zh.wav", "size_bytes": len(wav), "sha256": _sha(wav)},
+        {"name": "model.int8.onnx", "size_bytes": len(model), "sha256": _sha(model)},
+    ]
+    manifest = _manifest(files)
+    dest = tmp_path / "installed"
+    install_archive(archive, manifest, dest)
+    assert (dest / "test_wavs" / "zh.wav").read_bytes() == wav
+    assert (dest / "model.int8.onnx").read_bytes() == model
+
+
+def test_install_archive_rejects_excessive_nesting_depth(tmp_path) -> None:
+    model = b"model-weights"
+    archive = tmp_path / "m.tar.bz2"
+    deep = "/".join(["r"] * 9) + "/model.int8.onnx"
+    _write_tar(archive, {deep: model})
+    files = [{"name": "model.int8.onnx", "size_bytes": len(model), "sha256": _sha(model)}]
+    manifest = _manifest(files)
+    with pytest.raises(ArchiveError):
+        install_archive(archive, manifest, tmp_path / "installed")
+
+
 def test_install_archive_rejects_symlink(tmp_path) -> None:
     model = b"model-weights"
     archive = tmp_path / "m.tar.bz2"

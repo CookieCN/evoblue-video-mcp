@@ -12,6 +12,8 @@
 
 import os
 
+from PyInstaller.utils.hooks import copy_metadata
+
 variant = os.environ.get("EVOBLUE_PKG_VARIANT", "full")
 if variant not in ("base", "full"):
     raise SystemExit(f"unknown EVOBLUE_PKG_VARIANT: {variant!r}")
@@ -19,6 +21,13 @@ if variant not in ("base", "full"):
 is_full = variant == "full"
 
 datas = []
+# Diagnostics read versions via importlib.metadata; frozen builds have no
+# site-packages dist-info unless it is copied in (feedback #1/#5: without
+# this a perfectly working yt-dlp/ASR runtime diagnosed as "not installed").
+datas += copy_metadata("yt-dlp")
+if is_full:
+    datas += copy_metadata("sherpa-onnx")
+    datas += copy_metadata("onnxruntime")
 hiddenimports = [
     # uvicorn's dynamically-selected pieces (uvicorn[standard])
     "uvicorn.logging",

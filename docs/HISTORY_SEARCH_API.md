@@ -32,7 +32,8 @@
 ## 1. `GET /api/history` — 历史列表
 
 已入索引(`report_documents.doc_status = 'active'` 或 `'stale'`)的报告元数据,按
-`analyzed_at` 降序固定排序。
+`analyzed_at` 降序固定排序(同值时按 `id` 降序唯一决胜,保证跨页确定性;R6 修订
+2026-09-14)。
 
 ```
 GET /api/history?limit=20&offset=0&platform=youtube&language=zh&asr_provider=
@@ -42,9 +43,11 @@ GET /api/history?limit=20&offset=0&platform=youtube&language=zh&asr_provider=
 |---|---|---|
 | `limit` | 1–100,默认 20 | |
 | `offset` | ≥ 0,默认 0 | |
-| `platform` | 可选 | 精确匹配小写平台标识 |
+| `platform` | 可选 | 不区分大小写精确匹配(R8 修订 2026-09-14,与 `/api/jobs` 语义一致) |
 | `language` | 可选 | 精确匹配 |
 | `asr_provider` | 可选 | 精确匹配;空串过滤平台字幕报告 |
+| `query` | ≤200 字符,可选 | title/source_url 大小写不敏感子串(R4b 修订 2026-09-12) |
+| `exclude_unfinished_jobs` | 布尔,默认 false | 为 true 时排除所有 job 行非 `completed` 的报告(R6 修订 2026-09-14;供 MCP 默认视图的统一端点 `GET /api/jobs/unified` 在**同一 SQLite 快照**内构造两段严格不相交的分页集合——任务行胜出,报告不得跨段重复,R9 四轮修订) |
 
 响应 `HistoryListResponse`:
 

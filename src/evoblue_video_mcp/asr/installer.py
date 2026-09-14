@@ -16,6 +16,7 @@ machine. It is crash-safe and idempotent:
 """
 
 import asyncio
+import logging
 import shutil
 import time
 import uuid
@@ -58,6 +59,8 @@ from evoblue_video_mcp.storage.repository import (
     switch_download_source,
     update_download_progress,
 )
+
+logger = logging.getLogger(__name__)
 
 # Stable, desensitized error codes surfaced on ModelDownload.error_code.
 NOT_RELEASABLE = "NOT_RELEASABLE"
@@ -502,6 +505,12 @@ async def _install_model_locked(
         )
     except DownloadError as exc:
         _truncate(temp_path)
+        logger.warning(
+            "model download failed: model=%s version=%s code=%s",
+            manifest.model_id,
+            manifest.version,
+            exc.code,
+        )
         return await _mark_terminal(
             session,
             operation_id=op_id,
@@ -511,6 +520,17 @@ async def _install_model_locked(
         )
     except ArchiveError as exc:
         _truncate(temp_path)
+        # F2 (feedback #7): the outer code stays ARCHIVE_INVALID, but the file
+        # log (docs/ENGINE_LOGGING.md) carries the exact structural reason —
+        # messages reference archive-relative member names only, never paths
+        # outside the archive or credentials.
+        logger.warning(
+            "model install failed: model=%s version=%s code=%s reason=%s",
+            manifest.model_id,
+            manifest.version,
+            exc.code,
+            exc,
+        )
         return await _mark_terminal(
             session,
             operation_id=op_id,

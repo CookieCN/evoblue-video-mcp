@@ -14,6 +14,7 @@ registration.
 
 import json
 import logging
+import time
 from typing import Annotated, Any, Literal, TypeVar
 
 import httpx
@@ -35,8 +36,12 @@ from evoblue_video_mcp.mcp.engine_client import (
     EngineClient,
 )
 from evoblue_video_mcp.mcp.errors import translate_request_error, translate_status
-from evoblue_video_mcp.mcp.listing import _SOURCE_FETCH_LIMIT as _SOURCE_LIMIT
-from evoblue_video_mcp.mcp.listing import merge_job_pages
+from evoblue_video_mcp.mcp.listing import (
+    EngineListFormatError,
+    completed_page,
+    single_source_page,
+    unified_page,
+)
 from evoblue_video_mcp.mcp.messages import cancel_message, status_message
 from evoblue_video_mcp.mcp.schemas import (
     AnalysisReportResult,
@@ -95,6 +100,37 @@ async def _request(
     return body, None
 
 
+#: R4b (review round 2): every list view is a pushed-down server query; the
+#: per-request budget below bounds each engine round trip while the monotonic
+#: deadline keeps the WHOLE tool call inside TIMEOUT_LIST_S no matter how
+#: many segments a view needs (max 2 requests per call by construction).
+_LIST_BUDGET_S = float(TIMEOUT_LIST_S)
+
+
+async def _paged(
+    client: EngineClient,
+    path: str,
+    params: dict[str, object],
+    *,
+    deadline: float,
+) -> tuple[dict[str, object], ToolError | None]:
+    """One engine GET within the remaining tool budget."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return {}, translate_request_error(
+            httpx.TimeoutException("list tool budget exhausted")
+        )
+    body, error = await _request(
+        client,
+        "GET",
+        path,
+        params=params,
+        timeout_s=min(_LIST_BUDGET_S, remaining),
+    )
+    data = body if isinstance(body, dict) else {}
+    return data, error
+
+
 async def _submit(
     client: EngineClient, *, url: str, mode: str, asr: str, language: str | None
 ) -> SubmitVideoAnalysisResult:
@@ -130,6 +166,14 @@ async def _status(client: EngineClient, *, job_id: str) -> AnalysisStatusResult:
         return _validated(AnalysisStatusResult, None, tool="get_analysis_status", error=error)
     data = body if isinstance(body, dict) else {}
     current = str(data.get("status"))
+    # F3 (feedback #3): the engine synthesizes the root-cause line server-side
+    # (real address, no token); the bridge only relays it.
+    blocked = data.get("blocked_message")
+    message = (
+        str(blocked)
+        if blocked
+        else status_message(current, error_code=data.get("error_code"))
+    )
     return _validated(
         AnalysisStatusResult,
         {
@@ -137,7 +181,7 @@ async def _status(client: EngineClient, *, job_id: str) -> AnalysisStatusResult:
             "status": current,
             "progress": data.get("progress"),
             "stage": data.get("stage"),
-            "message": status_message(current, error_code=data.get("error_code")),
+            "message": message,
             "retryable": bool(data.get("retryable", False)),
             "error_code": data.get("error_code"),
             "error_detail": data.get("error_detail"),
@@ -199,33 +243,85 @@ async def _list(
     platform: str | None,
     query: str | None,
 ) -> ListAnalysisJobsResult:
-    jobs_params: dict[str, object] = {"limit": _SOURCE_LIMIT}
-    if status is not None:
-        jobs_params["status"] = status
-    jobs_body, error = await _request(
-        client, "GET", "/api/jobs", params=jobs_params, timeout_s=TIMEOUT_LIST_S
-    )
-    if error is not None:
-        return _validated(ListAnalysisJobsResult, None, tool="list_analysis_jobs", error=error)
-    history_params: dict[str, object] = {"limit": _SOURCE_LIMIT, "offset": 0}
+    """R4b-R9 (review rounds 2-4): every view is a pushed-down server query —
+    the engine pages and counts the SAME filtered collection, so no row is
+    unreachable behind a fetch cap:
+      - explicit non-completed status: ONE /api/jobs query (status/filters/
+        pagination pushed);
+      - completed: ONE /api/history query (filters/pagination pushed);
+      - default: ONE /api/jobs/unified request answering from a single
+        SQLite snapshot (segment counts, exclusion, ordering, slice).
+
+    R13/R14/R15 (review rounds 5-6): every branch validates the engine's
+    200 body against the frozen REST contract and degrades violations to
+    ``ok:false / BRIDGE_INTERNAL`` — never a fake empty page."""
+    deadline = time.monotonic() + _LIST_BUDGET_S
+    filters: dict[str, object] = {}
     if platform is not None:
-        history_params["platform"] = platform
-    history_body, error = await _request(
-        client, "GET", "/api/history", params=history_params, timeout_s=TIMEOUT_LIST_S
+        filters["platform"] = platform
+    if query is not None:
+        filters["query"] = query
+
+    def _fail(error: ToolError | None) -> ListAnalysisJobsResult:
+        return _validated(
+            ListAnalysisJobsResult, None, tool="list_analysis_jobs", error=error
+        )
+
+    def _degrade_to_bridge_internal() -> ListAnalysisJobsResult:
+        # A malformed 200 body becomes the frozen envelope (ok:false /
+        # BRIDGE_INTERNAL) — never a fake empty page and never a
+        # protocol-level error. ``_validated`` with no payload walks its own
+        # ValidationError degrade path and logs the tool name only.
+        return _validated(ListAnalysisJobsResult, None, tool="list_analysis_jobs")
+
+    if status is not None and status != JobStatus.COMPLETED:
+        jobs_body, error = await _paged(
+            client,
+            "/api/jobs",
+            {"limit": limit, "offset": offset, "status": status, **filters},
+            deadline=deadline,
+        )
+        if error is not None:
+            return _fail(error)
+        try:
+            merged = single_source_page(
+                jobs_body, status=status, limit=limit, offset=offset
+            )
+        except EngineListFormatError:
+            return _degrade_to_bridge_internal()
+        return _validated(ListAnalysisJobsResult, merged.model_dump(), tool="list_analysis_jobs")
+
+    if status == JobStatus.COMPLETED:
+        history_body, error = await _paged(
+            client, "/api/history", {"limit": limit, "offset": offset, **filters},
+            deadline=deadline,
+        )
+        if error is not None:
+            return _fail(error)
+        try:
+            merged = completed_page(history_body, limit=limit, offset=offset)
+        except EngineListFormatError:
+            return _degrade_to_bridge_internal()
+        return _validated(ListAnalysisJobsResult, merged.model_dump(), tool="list_analysis_jobs")
+
+    # Default view (R9, review round 4): ONE request to the unified engine
+    # endpoint. It answers from a single SQLite read transaction — both
+    # segment counts, the unfinished-job exclusion, the ordering, and the
+    # page slice — so a worker committing a job's completion between the
+    # segment reads can never make the same job appear twice (the two-request
+    # design could: job row already returned, report newly eligible).
+    unified_body, error = await _paged(
+        client,
+        "/api/jobs/unified",
+        {"limit": limit, "offset": offset, **filters},
+        deadline=deadline,
     )
     if error is not None:
-        return _validated(ListAnalysisJobsResult, None, tool="list_analysis_jobs", error=error)
-    jobs_data = jobs_body if isinstance(jobs_body, dict) else {}
-    history_data = history_body if isinstance(history_body, dict) else {}
-    merged = merge_job_pages(
-        jobs_data,
-        history_data,
-        limit=limit,
-        offset=offset,
-        status=status,
-        platform=platform,
-        query=query,
-    )
+        return _fail(error)
+    try:
+        merged = unified_page(unified_body, limit=limit, offset=offset)
+    except EngineListFormatError:
+        return _degrade_to_bridge_internal()
     return _validated(ListAnalysisJobsResult, merged.model_dump(), tool="list_analysis_jobs")
 
 

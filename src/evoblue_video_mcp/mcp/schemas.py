@@ -112,6 +112,10 @@ class AnalysisJobListItem(StrictModel):
     platform: str | None = None
     status: JobStatus
     progress: int | None = Field(default=None, ge=0, le=100)
+    # F4 (feedback #15/#16): failed/cancelled history stays visible and
+    # attributable; url identifies jobs whose metadata never landed.
+    error_code: str | None = None
+    url: str | None = None
 
 
 class ListAnalysisJobsOutput(SuccessEnvelope):

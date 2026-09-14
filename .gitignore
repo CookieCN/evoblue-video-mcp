@@ -38,3 +38,5 @@ benchmarks/_work/
 # `git worktree remove` in the owning repo, never by deleting the directory)
 .codex-worktrees/
 tmp-fetch-log.ps1
+# feedback-fix reproduction workspace (real archives, frozen data dirs)
+tmp-repro/

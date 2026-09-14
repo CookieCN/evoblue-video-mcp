@@ -59,17 +59,47 @@ async function apiFetch(input, init = {}) {
   return r;
 }
 
+// F1 (feedback #12): a failed save used to surface only "HTTP 400" — the
+// backend's readable detail (e.g. the runnable-setup gate reason) was thrown
+// away, leaving the user with no clue why nothing happened.
+async function responseDetail(r) {
+  const data = await r.json().catch(() => null);
+  return data?.detail || `HTTP ${r.status}`;
+}
+
+// F4 (feedback #15): failed/cancelled history needs a visible entry — the
+// chips issue a server-side status query so the filter is exact, not a
+// client-side sample of the first page.
+const JOB_STATUS_FILTERS = [
+  { value: null, label: "全部" },
+  { value: "completed", label: "已完成" },
+  { value: "failed", label: "失败" },
+  { value: "cancelled", label: "已取消" },
+];
+
 function Home() {
   const [jobs, setJobs] = useState([]);
   const [error, setError] = useState(null);
   const [settings, setSettings] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
 
   useEffect(() => {
-    apiFetch("/api/jobs")
+    let cancelled = false;
+    apiFetch(statusFilter ? `/api/jobs?status=${statusFilter}` : "/api/jobs")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => setJobs(data.items ?? []))
-      .catch((e) => setError(e.message));
-    // P8-002: surface why queued jobs are not starting (setup incomplete)
+      .then((data) => {
+        if (!cancelled) setJobs(data.items ?? []);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [statusFilter]);
+
+  // P8-002: surface why queued jobs are not starting (setup incomplete)
+  useEffect(() => {
     apiFetch("/api/settings")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then(setSettings)
@@ -123,18 +153,61 @@ function Home() {
             。
           </p>
         )}
+        {/* F4 (feedback #15): failed/cancelled tasks need an entry point; the
+            chips query the server so filtering is exact. */}
+        <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="状态筛选">
+          {JOB_STATUS_FILTERS.map((f) => (
+            <button
+              key={f.label}
+              type="button"
+              aria-pressed={statusFilter === f.value}
+              onClick={() => setStatusFilter(f.value)}
+              className={
+                statusFilter === f.value
+                  ? "rounded-full bg-slate-900 px-3 py-1 text-sm font-medium text-white"
+                  : "rounded-full border border-slate-300 px-3 py-1 text-sm text-slate-600 hover:bg-slate-50"
+              }
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
         {error ? (
           <p className="mt-4 rounded-xl bg-red-50 p-4 text-red-700">{error}</p>
         ) : jobs.length === 0 ? (
           <p className="mt-4 rounded-xl border border-dashed border-slate-300 p-8 text-center text-slate-500">
-            还没有分析记录。完成首次设置后即可提交视频链接。
+            {statusFilter
+              ? "该状态下暂无任务记录。"
+              : "还没有分析记录。完成首次设置后即可提交视频链接。"}
           </p>
         ) : (
           <ul className="mt-4 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
             {jobs.map((job) => (
-              <li key={job.job_id} className="flex items-center justify-between px-4 py-3">
-                <span className="font-mono text-sm text-slate-700">{job.job_id}</span>
-                <span className="text-sm text-slate-500">{job.status}</span>
+              <li key={job.job_id} className="flex items-center justify-between gap-3 px-4 py-3">
+                <span className="min-w-0">
+                  <span className="font-mono text-sm text-slate-700">{job.job_id}</span>
+                  {/* F3 (feedback #9): title as soon as metadata lands; the url
+                      keeps the row identifiable while waiting/failing. */}
+                  <span className="ml-2 block truncate text-sm text-slate-600 sm:inline">
+                    {job.title || job.url || ""}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="text-sm text-slate-500">{job.status}</span>
+                  {/* F4 (feedback #15/#16): terminal rows carry the stable
+                      error code so failure history is attributable at a
+                      glance. */}
+                  {job.error_code && job.status === "failed" && (
+                    <span className="rounded bg-red-50 px-1.5 py-0.5 font-mono text-xs text-red-700">
+                      {job.error_code}
+                    </span>
+                  )}
+                  {job.error_code && job.status === "cancelled" && (
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
+                      {job.error_code}
+                    </span>
+                  )}
+                </span>
               </li>
             ))}
           </ul>
@@ -144,19 +217,28 @@ function Home() {
   );
 }
 
+// DeepSeek preset verified against the official API docs on 2026-09-10:
+// deepseek-flash is the current recommended name; deepseek-chat is retired
+// and deepseek-v4-flash is a still-accepted legacy alias — prefer the primary.
 const LLM_PRESETS = {
-  deepseek: { base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+  deepseek: { base_url: "https://api.deepseek.com", model: "deepseek-flash" },
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
 };
+
+// Models the provider has retired — stored configs keep working only until
+// the endpoint rejects them, so surface an editable migration hint.
+const RETIRED_LLM_MODELS = { "deepseek-chat": "deepseek-flash" };
 
 function Settings() {
   const [settings, setSettings] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState(null);
+  const [messageTone, setMessageTone] = useState("neutral");
   const [form, setForm] = useState({
     llm_provider: "deepseek",
     llm_base_url: "https://api.deepseek.com",
-    llm_model: "deepseek-chat",
+    llm_model: "deepseek-flash",
     llm_api_key: "",
     report_directory: "",
   });
@@ -190,17 +272,39 @@ function Settings() {
   // unless the provider is UNCHANGED and the store already holds its key
   // (switching providers points the credential ref at an empty slot).
   const keyProvided = form.llm_api_key.trim().length > 0;
+  // R1b (review round 2): the stored key is scoped to the endpoint RECORDED
+  // with it (llm_credential_origin), not to the editable Base URL row —
+  // same provider AND same origin, or a key for the new endpoint is required.
+  const sameOrigin = (() => {
+    try {
+      return (
+        new URL(form.llm_base_url.trim()).origin ===
+        new URL((settings?.llm_credential_origin ?? "").trim()).origin
+      );
+    } catch {
+      return false;
+    }
+  })();
   const keyAlreadyOk =
     settings != null &&
     settings.llm_api_key_configured === true &&
     typeof settings.llm_provider === "string" &&
     settings.llm_provider.trim().toLowerCase() ===
-      form.llm_provider.trim().toLowerCase();
+      form.llm_provider.trim().toLowerCase() &&
+    sameOrigin;
   const setupReady =
     form.llm_provider.trim() &&
     form.llm_base_url.trim() &&
     form.llm_model.trim() &&
     (keyProvided || keyAlreadyOk);
+
+  const retiredModelHint = (() => {
+    const stored = settings?.llm_model?.trim().toLowerCase();
+    if (stored && RETIRED_LLM_MODELS[stored] && form.llm_model.trim().toLowerCase() === stored) {
+      return `官方已下线 ${stored}，建议改为 ${RETIRED_LLM_MODELS[stored]}（可直接修改后保存）`;
+    }
+    return null;
+  })();
 
   function pickProvider(provider) {
     const preset = LLM_PRESETS[provider];
@@ -232,15 +336,51 @@ function Settings() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) throw new Error(await responseDetail(r));
       const data = await r.json();
       setSettings(data);
       setForm((f) => ({ ...f, llm_api_key: "" }));
-      setMessage("设置已保存，排队任务将自动开始");
+      setMessageTone("ok");
+      setMessage("设置已保存；建议点「测试连接」验证 Key 与模型可用");
     } catch (e) {
+      setMessageTone("error");
       setMessage(`保存失败：${e.message}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // F1 (feedback #8): explicit connectivity test for the configuration the
+  // user is LOOKING at — never saves, never completes setup.
+  async function testConnection() {
+    setTesting(true);
+    setMessage(null);
+    try {
+      const body = {
+        llm_provider: form.llm_provider.trim(),
+        llm_base_url: form.llm_base_url.trim(),
+        llm_model: form.llm_model.trim(),
+      };
+      const apiKey = form.llm_api_key.trim();
+      if (apiKey) body.llm_api_key = apiKey;
+      const r = await apiFetch("/api/settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(data?.detail || `HTTP ${r.status}`);
+      setMessageTone(data.status === "ok" ? "ok" : "error");
+      setMessage(
+        data.status === "ok"
+          ? data.message
+          : `测试未通过：${data.message}`
+      );
+    } catch (e) {
+      setMessageTone("error");
+      setMessage(`测试失败：${e.message}`);
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -323,7 +463,20 @@ function Settings() {
           </dl>
         )}
 
-        <div className="mt-6 space-y-4">
+        <form
+          className="mt-6 space-y-4"
+          onSubmit={(e) => {
+            // F1 (feedback #12): Enter in any field now saves, same gate as
+            // the button.
+            e.preventDefault();
+            if (setupReady && !saving) saveSetup();
+          }}
+        >
+          {retiredModelHint && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
+              {retiredModelHint}
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <label className="block text-sm text-slate-700">
               Provider
@@ -343,7 +496,7 @@ function Settings() {
                 value={form.llm_model}
                 onChange={(e) => setForm({ ...form, llm_model: e.target.value })}
                 className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
-                placeholder="deepseek-chat"
+                placeholder="deepseek-flash"
               />
             </label>
           </div>
@@ -384,12 +537,19 @@ function Settings() {
           </label>
           <div className="flex flex-wrap items-center gap-3">
             <button
-              type="button"
-              onClick={saveSetup}
+              type="submit"
               disabled={saving || !setupReady}
               className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800 disabled:opacity-50"
             >
               {saving ? "保存中…" : "保存并完成设置"}
+            </button>
+            <button
+              type="button"
+              onClick={testConnection}
+              disabled={testing || saving || !form.llm_base_url.trim()}
+              className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-700 hover:bg-cyan-50 disabled:opacity-50"
+            >
+              {testing ? "测试中…" : "测试连接"}
             </button>
             <button
               type="button"
@@ -398,9 +558,21 @@ function Settings() {
             >
               导出诊断信息
             </button>
-            {message && <span className="text-sm text-slate-600">{message}</span>}
+            {message && (
+              <span
+                className={
+                  messageTone === "ok"
+                    ? "text-sm text-emerald-600"
+                    : messageTone === "error"
+                      ? "text-sm text-rose-600"
+                      : "text-sm text-slate-600"
+                }
+              >
+                {message}
+              </span>
+            )}
           </div>
-        </div>
+        </form>
 
         {settings && (
           <div className="mt-8 border-t border-slate-200 pt-6">
@@ -458,6 +630,10 @@ function Models() {
   const [models, setModels] = useState([]);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
+  // F5 (feedback #10): the model whose action POST is in flight — the action
+  // button is disabled for it until the response (or the next poll) lands,
+  // so a quick double-click can only ever send one request.
+  const [pendingAction, setPendingAction] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -509,21 +685,27 @@ function Models() {
       `即将下载 ${fmtBytes(m.compressed_size_bytes)}，安装后约占用 ${fmtBytes(m.installed_size_bytes)}。\n\n继续？`;
     if (!window.confirm(note)) return;
     setMessage(null);
+    setPendingAction(m.model_id);
     try {
       const r = await apiFetch(`/api/models/${m.model_id}/install`, { method: "POST" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) throw new Error(await responseDetail(r));
     } catch (e) {
       setError(`安装失败：${e.message}`);
+    } finally {
+      setPendingAction(null);
     }
   }
 
   async function cancel(m) {
     setMessage(null);
+    setPendingAction(m.model_id);
     try {
       const r = await apiFetch(`/api/models/${m.model_id}/cancel`, { method: "POST" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) throw new Error(await responseDetail(r));
     } catch (e) {
       setError(`取消失败：${e.message}`);
+    } finally {
+      setPendingAction(null);
     }
   }
 
@@ -532,9 +714,10 @@ function Models() {
       return;
     }
     setMessage(null);
+    setPendingAction(m.model_id);
     try {
       const r = await apiFetch(`/api/models/${m.model_id}`, { method: "DELETE" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) throw new Error(await responseDetail(r));
       const data = await r.json();
       if (data.pending_reclaim_bytes > 0) {
         setMessage(`模型已卸载，约 ${fmtBytes(data.pending_reclaim_bytes)} 空间等待系统清理`);
@@ -543,6 +726,8 @@ function Models() {
       }
     } catch (e) {
       setError(`卸载失败：${e.message}`);
+    } finally {
+      setPendingAction(null);
     }
   }
 
@@ -556,7 +741,8 @@ function Models() {
       </header>
 
       <p className="mt-3 text-sm text-slate-600">
-        模型按需下载，安装前会先展示体积。下载支持断点续传、取消与卸载。
+        模型按需下载。下载/安装体积已标注在卡片上：点击「安装」并在确认框中确认后，
+        立即开始下载（支持断点续传），随时可取消或卸载。
       </p>
 
       {error && <p className="mt-4 rounded-xl bg-red-50 p-4 text-red-700">{error}</p>}
@@ -574,28 +760,41 @@ function Models() {
                     {m.model_id} · {m.version}
                   </p>
                 </div>
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-medium ${
-                    state === "installed"
-                      ? "bg-emerald-100 text-emerald-700"
+                {/* F5 (feedback #10): the state word lives in an aria-live
+                    region so assistive tech announces state transitions
+                    (未安装 → 下载中 → 已安装/失败); the progress percentage
+                    is a sibling OUTSIDE it — it changes every poll and would
+                    spam announcements. */}
+                <span className="flex items-center gap-2">
+                  <span
+                    aria-live="polite"
+                    className={`rounded-full px-3 py-1 text-xs font-medium ${
+                      state === "installed"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : state === "downloading"
+                          ? "bg-cyan-100 text-cyan-700"
+                          : state === "failed"
+                            ? "bg-red-100 text-red-700"
+                            : "bg-slate-100 text-slate-600"
+                    }`}
+                  >
+                    {state === "installed"
+                      ? m.active
+                        ? "已激活"
+                        : "已安装"
                       : state === "downloading"
-                        ? "bg-cyan-100 text-cyan-700"
+                        ? "下载中"
                         : state === "failed"
-                          ? "bg-red-100 text-red-700"
-                          : "bg-slate-100 text-slate-600"
-                  }`}
-                >
-                  {state === "installed"
-                    ? m.active
-                      ? "已激活"
-                      : "已安装"
-                    : state === "downloading"
-                      ? `下载中 ${progressOf(m)}%`
-                      : state === "failed"
-                        ? "失败"
-                        : state === "cancelled"
-                          ? "已取消"
-                          : "未安装"}
+                          ? "失败"
+                          : state === "cancelled"
+                            ? "已取消"
+                            : "未安装"}
+                  </span>
+                  {state === "downloading" && (
+                    <span className="font-mono text-xs text-cyan-700">
+                      {progressOf(m)}%
+                    </span>
+                  )}
                 </span>
               </div>
 
@@ -649,32 +848,52 @@ function Models() {
                 </p>
               )}
 
+              {/* F5 (feedback #10): ONE button element that morphs with the
+                  model state instead of swapping distinct buttons — focus is
+                  preserved across state transitions, and it is disabled while
+                  its own request is in flight (double-click = one POST; the
+                  backend additionally joins concurrent installs). */}
               <div className="mt-5 flex items-center gap-3">
-                {state === "downloading" ? (
-                  <button
-                    type="button"
-                    onClick={() => cancel(m)}
-                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                  >
-                    取消
-                  </button>
-                ) : state === "installed" ? (
-                  <button
-                    type="button"
-                    onClick={() => uninstall(m)}
-                    className="rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
-                  >
-                    卸载
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => install(m)}
-                    className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800"
-                  >
-                    安装
-                  </button>
-                )}
+                {(() => {
+                  const busy = pendingAction === m.model_id;
+                  const action = () =>
+                    state === "downloading"
+                      ? cancel(m)
+                      : state === "installed"
+                        ? uninstall(m)
+                        : install(m);
+                  const label =
+                    state === "downloading"
+                      ? busy
+                        ? "取消中…"
+                        : "取消"
+                      : state === "installed"
+                        ? "卸载"
+                        : `安装（下载 ${fmtBytes(m.compressed_size_bytes)}）`;
+                  const ariaLabel =
+                    state === "downloading"
+                      ? "取消下载"
+                      : state === "installed"
+                        ? `卸载 ${tierLabel(m)}`
+                        : `安装 ${tierLabel(m)}，下载 ${fmtBytes(m.compressed_size_bytes)}`;
+                  const tone =
+                    state === "downloading"
+                      ? "rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      : state === "installed"
+                        ? "rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50"
+                        : "rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-800";
+                  return (
+                    <button
+                      type="button"
+                      onClick={action}
+                      disabled={busy}
+                      aria-label={ariaLabel}
+                      className={`${tone} disabled:cursor-not-allowed disabled:opacity-50`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })()}
               </div>
             </div>
           );

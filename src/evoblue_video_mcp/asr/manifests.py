@@ -16,7 +16,7 @@ _STANDARD_SENSEVOICE = {
     "languages": ["zh", "en", "ja", "ko", "yue"],
     "platforms": ["windows-x86_64"],
     "compressed_size_bytes": 163002883,
-    "installed_size_bytes": 239549735,
+    "installed_size_bytes": 240506435,
     "license": "FunASR Model License 1.1",
     "attribution": "FunAudioLLM (Alibaba)",
     "upstream_url": "https://github.com/FunAudioLLM/SenseVoice",
@@ -33,11 +33,56 @@ _STANDARD_SENSEVOICE = {
             "size_bytes": 163002883,
         }
     ],
+    # The whitelist must cover EVERY file member of the pinned archive — the
+    # extractor rejects undeclared members, and the first real install
+    # (feedback #7, 2026-09-10) failed exactly because README.md/LICENSE/
+    # export-onnx.py/test_wavs were missing here. Digests re-measured from the
+    # verified archive (sha256 7d1e...347e) on 2026-09-10.
     "files": [
+        {
+            "name": "LICENSE",
+            "size_bytes": 71,
+            "sha256": "221c6df10b0931a5629adad671ea48fb7747e034c414b6d2bfa275bc3dd4ea17",
+        },
+        {
+            "name": "README.md",
+            "size_bytes": 104,
+            "sha256": "763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63",
+        },
+        {
+            "name": "export-onnx.py",
+            "size_bytes": 5905,
+            "sha256": "c97f6a33f9d7135efd4d55b3e24e288c47d925f3b4f04b8b3418c2821c0a89ce",
+        },
         {
             "name": "model.int8.onnx",
             "size_bytes": 239233841,
             "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+        },
+        {
+            "name": "test_wavs/en.wav",
+            "size_bytes": 228908,
+            "sha256": "eb1eb008904465b74c304aad8342e8c7d3c6e61ffe9f66adcaca9cf0f76a93f4",
+        },
+        {
+            "name": "test_wavs/ja.wav",
+            "size_bytes": 230444,
+            "sha256": "460bd8dccb0d2a5f4e29c628f837be4082d13defc64c3fc21dd1b6bb0e119095",
+        },
+        {
+            "name": "test_wavs/ko.wav",
+            "size_bytes": 147500,
+            "sha256": "0dc797a5c81ed30fc339d91f3da718ab02854e17ffa37cb93c4c039ac5c6bb9c",
+        },
+        {
+            "name": "test_wavs/yue.wav",
+            "size_bytes": 164780,
+            "sha256": "0960b2db54ae202071d250e6462fbf74a3c863f0e3e7f01273e4939c996875a0",
+        },
+        {
+            "name": "test_wavs/zh.wav",
+            "size_bytes": 178988,
+            "sha256": "b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373",
         },
         {
             "name": "tokens.txt",
@@ -54,7 +99,7 @@ _LITE_ZIPFORMER = {
     "languages": ["zh"],
     "platforms": ["windows-x86_64"],
     "compressed_size_bytes": 50536402,
-    "installed_size_bytes": 62935406,
+    "installed_size_bytes": 63352462,
     "license": "Apache-2.0 (icefall/WenetSpeech upstream; exact archive carries no license file)",
     "attribution": "k2-fsa sherpa-onnx / icefall",
     "upstream_url": "https://github.com/k2-fsa/icefall",
@@ -71,6 +116,10 @@ _LITE_ZIPFORMER = {
             "size_bytes": 50536402,
         }
     ],
+    # Full per-file whitelist of the pinned archive (re-measured 2026-09-10
+    # from the verified archive, sha256 6a71...524c): the upstream ships
+    # test_wavs alongside the model files and the extractor rejects members
+    # that are not declared here.
     "files": [
         {
             "name": "bbpe.model",
@@ -81,6 +130,21 @@ _LITE_ZIPFORMER = {
             "name": "model.int8.onnx",
             "size_bytes": 62666860,
             "sha256": "32e5f17cc9a77d480f8d94bda97b7cc7a40965b6651b35385813f561a74129c8",
+        },
+        {
+            "name": "test_wavs/0.wav",
+            "size_bytes": 179646,
+            "sha256": "668bf8df51a10027b84d5d8816a1ce11ae93545538dc05cfe2aa6811d399c250",
+        },
+        {
+            "name": "test_wavs/1.wav",
+            "size_bytes": 164976,
+            "sha256": "30edbabea84ca4c076f5b43bb44495f436f6711319c32a200d3fc5c67c1fee1d",
+        },
+        {
+            "name": "test_wavs/8k.wav",
+            "size_bytes": 72434,
+            "sha256": "0ed3bddacf0a23477d2b3c07ff9c24ad9c1fc3b31cdd47cb0773441e8e045cde",
         },
         {
             "name": "tokens.txt",

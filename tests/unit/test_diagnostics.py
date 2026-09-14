@@ -152,6 +152,7 @@ async def test_llm_config_reports_key_state_without_leaking_secrets(
     [
         (200, "pass", "可达"),
         (503, "warning", "HTTP 503"),
+        (401, "warning", "认证失败"),
     ],
 )
 async def test_llm_api_network_probe_gated_and_graded(
@@ -170,7 +171,7 @@ async def test_llm_api_network_probe_gated_and_graded(
             llm_model="deepseek-chat",
         )
 
-    async def fake_get(url: str) -> int:
+    async def fake_get(url: str, headers: dict[str, str]) -> int:
         assert url == "https://api.deepseek.com/models"
         return status_code
 
@@ -180,6 +181,105 @@ async def test_llm_api_network_probe_gated_and_graded(
     check = _by_name(report)["llm_api"]
     assert check.status == expected_status
     assert message_fragment in check.message
+
+
+async def test_llm_api_probe_sends_bearer_from_credential_store(
+    make_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F1 (#13): a valid stored key must authenticate the probe — the old bare
+    GET made every valid DeepSeek key diagnose as HTTP 401."""
+    async with make_factory() as sess:
+        await save_app_settings(
+            sess,
+            setup_completed=True,
+            now=_NOW,
+            llm_provider="deepseek",
+            llm_base_url="https://api.deepseek.com",
+            llm_model="deepseek-flash",
+            llm_credential_ref="llm:deepseek",
+        )
+
+    seen: dict[str, object] = {}
+
+    async def fake_get(url: str, headers: dict[str, str]) -> int:
+        seen["url"] = url
+        seen["auth"] = headers.get("Authorization")
+        return 200
+
+    report = await _collect(
+        make_factory,
+        credential_store=FakeCredentialStore("sk-valid-key-material"),
+        include_network=True,
+        http_get=fake_get,
+    )
+    check = _by_name(report)["llm_api"]
+    assert check.status == "pass"
+    assert "认证有效" in check.message
+    assert seen["auth"] == "Bearer sk-valid-key-material"
+    assert "sk-valid-key-material" not in check.message + (check.detail or "")
+
+
+async def test_llm_api_without_key_reports_auth_failure(
+    make_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No stored key -> probe goes unauthenticated and 401 is reported as an
+    auth problem, not a generic error."""
+    async with make_factory() as sess:
+        await save_app_settings(
+            sess,
+            setup_completed=True,
+            now=_NOW,
+            llm_provider="deepseek",
+            llm_base_url="https://api.deepseek.com",
+            llm_model="deepseek-flash",
+            llm_credential_ref="llm:deepseek",
+        )
+
+    async def fake_get(url: str, headers: dict[str, str]) -> int:
+        assert "Authorization" not in headers
+        return 401
+
+    report = await _collect(
+        make_factory,
+        credential_store=FakeCredentialStore(None),
+        include_network=True,
+        http_get=fake_get,
+    )
+    check = _by_name(report)["llm_api"]
+    assert check.status == "warning"
+    assert check.detail == "auth_failed"
+
+
+async def test_llm_api_keyring_failure_does_not_probe(
+    make_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class BrokenStore:
+        def get_secret(self, reference: str) -> str | None:
+            raise RuntimeError("vault locked")
+
+    async with make_factory() as sess:
+        await save_app_settings(
+            sess,
+            setup_completed=True,
+            now=_NOW,
+            llm_provider="deepseek",
+            llm_base_url="https://api.deepseek.com",
+            llm_model="deepseek-flash",
+            llm_credential_ref="llm:deepseek",
+        )
+
+    async def must_not_probe(url: str, headers: dict[str, str]) -> int:
+        raise AssertionError("probe must not run when the keyring is unreadable")
+
+    report = await _collect(
+        make_factory,
+        credential_store=BrokenStore(),
+        include_network=True,
+        http_get=must_not_probe,
+    )
+    check = _by_name(report)["llm_api"]
+    assert check.status == "warning"
+    assert check.detail == "keyring_error"
 
 
 async def test_llm_api_unreachable_degrades_to_fail_type_only(
@@ -195,7 +295,7 @@ async def test_llm_api_unreachable_degrades_to_fail_type_only(
             llm_model="deepseek-chat",
         )
 
-    async def refusing(url: str) -> int:
+    async def refusing(url: str, headers: dict[str, str]) -> int:
         raise RuntimeError("connection refused to 127.0.0.1:9999")
 
     report = await _collect(make_factory, include_network=True, http_get=refusing)
@@ -264,3 +364,33 @@ async def test_worker_runtime_mirrors_the_claim_gate(
     named = _by_name(report)
     assert named["worker_runtime"].detail == "keyring_error"
     assert "keyring exploded" not in (named["worker_runtime"].message or "")
+
+
+async def test_yt_dlp_check_survives_missing_dist_metadata(
+    make_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2 (feedback #1): frozen builds carry no dist-info — the check must
+    still pass using yt-dlp's own version constant, not report the bundled
+    extractor as broken."""
+    import evoblue_video_mcp.application.diagnostics as diag
+
+    monkeypatch.setattr(diag, "_dist_version", lambda distribution: None)
+    report = await _collect(make_factory)
+    check = _by_name(report)["yt_dlp"]
+    assert check.status == "pass"
+    assert "不可用" not in check.message
+
+
+async def test_yt_dlp_check_fails_only_when_import_fails(
+    make_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", None)
+    monkeypatch.setitem(sys.modules, "yt_dlp.version", None)
+    report = await _collect(make_factory)
+    check = _by_name(report)["yt_dlp"]
+    assert check.status == "fail"
+    assert check.detail is not None  # exception type name only

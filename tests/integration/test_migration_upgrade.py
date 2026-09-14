@@ -108,6 +108,42 @@ async def _schema_snapshot(engine) -> dict:
 _HISTORICAL_V5 = """
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
 INSERT INTO schema_migrations VALUES (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0);
+-- a real v5 database always carries the jobs table (v1; v9 ALTERs it) and
+-- the app_settings table (v1; v10 ALTERs it)
+CREATE TABLE app_settings (
+    id INTEGER NOT NULL PRIMARY KEY,
+    setup_completed BOOLEAN NOT NULL,
+    report_directory VARCHAR,
+    llm_provider VARCHAR(32),
+    llm_model VARCHAR(128),
+    updated_at FLOAT NOT NULL,
+    llm_base_url VARCHAR,
+    llm_credential_ref VARCHAR(128)
+);
+CREATE TABLE jobs (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    job_id VARCHAR(64) NOT NULL,
+    idempotency_key VARCHAR(64) NOT NULL,
+    url TEXT NOT NULL,
+    mode VARCHAR(32) NOT NULL,
+    asr VARCHAR(32) NOT NULL,
+    language VARCHAR(64),
+    config_fingerprint VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    stage VARCHAR(32),
+    progress INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    max_attempts INTEGER NOT NULL,
+    lease_owner VARCHAR(64),
+    lease_expires_at FLOAT,
+    cancel_requested_at FLOAT,
+    next_retry_at FLOAT,
+    error_code VARCHAR(64),
+    error_detail TEXT,
+    retryable BOOLEAN NOT NULL,
+    created_at FLOAT NOT NULL,
+    updated_at FLOAT NOT NULL
+);
 CREATE TABLE model_install_state (
     model_id VARCHAR(64) NOT NULL PRIMARY KEY,
     version VARCHAR(64) NOT NULL,
@@ -178,13 +214,19 @@ _V8_TABLES = (
 )
 
 
-async def test_fresh_database_reaches_v8(tmp_path) -> None:
-    """P3-005 gate 1: an empty database migrates straight to v8."""
+async def test_fresh_database_reaches_latest(tmp_path) -> None:
+    """An empty database migrates straight to the current version (v10, R1b)."""
     engine = build_engine(tmp_path / "fresh.db")
     await init_db(engine)
     async with engine.connect() as conn:
         version = (await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))).scalar()
-        assert version == SCHEMA_VERSION == 8
+        assert version == SCHEMA_VERSION == 10
+        col_names = {row[1] for row in await conn.execute(text("PRAGMA table_info(jobs)"))}
+        assert {"title", "platform", "subtitle_probe"} <= col_names
+        settings_cols = {
+            row[1] for row in await conn.execute(text("PRAGMA table_info(app_settings)"))
+        }
+        assert "llm_credential_origin" in settings_cols
         tables = (
             await conn.execute(
                 text(
@@ -224,7 +266,7 @@ async def test_v7_database_upgrades_to_v8_preserving_data(tmp_path) -> None:
     await init_db(engine)
     async with engine.connect() as conn:
         version = (await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))).scalar()
-        assert version == SCHEMA_VERSION == 8
+        assert version == SCHEMA_VERSION
         legacy = (
             await conn.execute(
                 text("SELECT status FROM jobs WHERE job_id = 'job-legacy'")
@@ -371,3 +413,78 @@ async def test_backup_failure_does_not_block_migration(
         assert version == SCHEMA_VERSION
     await engine.dispose()
     assert any("MIGRATION_BACKUP_FAILED" in r.message for r in caplog.records)
+
+
+async def test_v8_database_upgrades_to_v9_preserving_rows(tmp_path) -> None:
+    """F3: v9 adds identity/probe columns without touching existing rows."""
+    engine8 = build_engine(tmp_path / "old.db")
+    await init_db(engine8, target_version=8)
+    async with engine8.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO jobs (job_id, request_fingerprint, url, mode, asr, "
+                "config_fingerprint, status, progress, attempt, max_attempts, "
+                "retryable, created_at, updated_at) VALUES "
+                "('job-v9', 'fp', 'https://youtu.be/x', 'auto', 'auto', 'cfp', "
+                "'waiting_for_model', 0, 0, 3, 0, 1000.0, 1000.0)"
+            )
+        )
+    await init_db(engine8)  # upgrade to v9
+    async with engine8.connect() as conn:
+        col_names = {row[1] for row in await conn.execute(text("PRAGMA table_info(jobs)"))}
+        assert {"title", "platform", "subtitle_probe"} <= col_names
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT url, title, subtitle_probe FROM jobs "
+                    "WHERE job_id='job-v9'"
+                )
+            )
+        ).first()
+        assert row is not None
+        assert row[0] == "https://youtu.be/x"
+        assert row[1] is None and row[2] is None
+    await engine8.dispose()
+
+
+async def test_v9_database_upgrades_to_v10_with_credential_origin_backfill(tmp_path) -> None:
+    """R1b: an existing v9 config with a bound credential gets its recorded
+    origin backfilled from the stored Base URL, so the boundary holds for
+    upgraded users; rows without a credential stay NULL."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from evoblue_video_mcp.storage.models import AppSettings
+
+    engine = build_engine(tmp_path / "v9.db")
+    await init_db(engine)  # create everything, then roll back to pre-v10
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as sess:
+        sess.add(
+            AppSettings(
+                id=1,
+                setup_completed=True,
+                llm_provider="deepseek",
+                llm_base_url="https://api.deepseek.com",
+                llm_model="deepseek-flash",
+                llm_credential_ref="llm:deepseek",
+                updated_at=1.0,
+            )
+        )
+        await sess.commit()
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE app_settings DROP COLUMN llm_credential_origin"))
+        await conn.execute(text("DELETE FROM schema_migrations WHERE version = 10"))
+    await init_db(engine)
+    async with engine.connect() as conn:
+        version = (await conn.execute(text("SELECT MAX(version) FROM schema_migrations"))).scalar()
+        assert version == 10
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT llm_credential_ref, llm_credential_origin "
+                    "FROM app_settings WHERE id = 1"
+                )
+            )
+        ).one()
+        assert row[0] == "llm:deepseek"
+        assert row[1] == "https://api.deepseek.com"

@@ -7,6 +7,7 @@ import pytest
 import yt_dlp.utils
 
 from evoblue_video_mcp.platforms.base import (
+    AUDIO_DOWNLOAD_FAILED,
     METADATA_FETCH_FAILED,
     SUBTITLE_MISSING,
     SUBTITLE_UNAVAILABLE,
@@ -266,3 +267,47 @@ def test_urlerror_string_reason_not_retryable() -> None:
 def test_connection_error_retryable() -> None:
     exc = ConnectionError("refused")
     assert _is_retryable_download_error(_dl_error(exc)) is True
+
+
+async def test_download_audio_failure_is_retryable(monkeypatch, tmp_path) -> None:
+    """An audio-download failure is retryable even when the cause is
+    unclassifiable: reaching this stage proves the video is accessible, so
+    the failure is almost always transient (CDN hiccup, reset, risk-control
+    403). The attempt budget bounds the rare permanent case — the old
+    default killed a recoverable job on one network blip (frozen acceptance
+    hit exactly that on Bilibili)."""
+
+    def _raise(self, ref, outdir):
+        raise yt_dlp.utils.DownloadError(
+            "Unable to download webpage",
+            exc_info=(ConnectionResetError, ConnectionResetError("reset"), None),
+        )
+
+    monkeypatch.setattr(
+        "evoblue_video_mcp.platforms.yt_dlp_adapter.YtDlpAdapter._download_audio", _raise
+    )
+    adapter = YtDlpAdapter()
+    ref = VideoRef(Platform.BILIBILI, "x", "https://www.bilibili.com/video/BV1x")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.download_audio(ref, str(tmp_path / "a.wav"))
+    assert exc.value.error_code == AUDIO_DOWNLOAD_FAILED
+    assert exc.value.retryable is True
+
+
+async def test_download_audio_unclassifiable_error_is_retryable(monkeypatch, tmp_path) -> None:
+    """Even a DownloadError with NO recognizable cause (the classifier's old
+    non-retryable default) must stay retryable on the audio path."""
+
+    def _raise(self, ref, outdir):
+        raise yt_dlp.utils.DownloadError("some platform said no", exc_info=None)
+
+    monkeypatch.setattr(
+        "evoblue_video_mcp.platforms.yt_dlp_adapter.YtDlpAdapter._download_audio", _raise
+    )
+    adapter = YtDlpAdapter()
+    ref = VideoRef(Platform.BILIBILI, "x", "https://www.bilibili.com/video/BV1x")
+
+    with pytest.raises(AdapterError) as exc:
+        await adapter.download_audio(ref, str(tmp_path / "a.wav"))
+    assert exc.value.retryable is True

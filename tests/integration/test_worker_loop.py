@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from evoblue_video_mcp.jobs import JobStatus
 from evoblue_video_mcp.runtime.worker import StageOutcome, run_worker_once
 from evoblue_video_mcp.storage.models import Job
-from evoblue_video_mcp.storage.repository import enqueue_job, get_job, request_cancellation
+from evoblue_video_mcp.storage.repository import (
+    advance_job,
+    claim_job,
+    enqueue_job,
+    get_job,
+    request_cancellation,
+)
 
 
 def _now() -> float:
@@ -90,6 +96,41 @@ async def test_worker_runs_full_pipeline_to_completion(
     )
     assert job is not None
     assert job.status == JobStatus.COMPLETED.value
+    assert job.lease_owner is None
+
+
+async def test_parking_into_waiting_consumes_pending_cancel(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """F4 (feedback #15): a cancel that lands between handler safe-point checks
+    must not be swallowed by the transition into waiting_for_model — the park
+    transaction lands cancelled instead, so a parked job can never silently
+    carry a cancel that only fires (from the user's view, unexplained) after a
+    later model install "resurrects" the job."""
+    async with session_factory() as sess:
+        await enqueue_job(
+            sess,
+            job_id="race-cancel",
+            url="https://www.youtube.com/watch?v=abc",
+            request_fingerprint="key-race-cancel",
+            config_fingerprint="fp-1",
+            now=1000.0,
+            status=JobStatus.TRANSCRIBING,
+        )
+        # Cancel while the handler is between safe points: running statuses
+        # only receive the flag; the handler below never checks it.
+        await request_cancellation(sess, job_id="race-cancel", now=1000.0)
+
+    job = await run_worker_once(
+        session_factory,
+        owner="worker-a",
+        lease_seconds=30.0,
+        now_fn=_now,
+        handlers={JobStatus.TRANSCRIBING: _ForwardHandler(JobStatus.WAITING_FOR_MODEL)},
+    )
+    assert job is not None
+    assert job.status == JobStatus.CANCELLED.value
+    assert job.error_code == "CANCELLED_BY_USER"
     assert job.lease_owner is None
 
 
@@ -244,3 +285,52 @@ async def test_running_worker_observes_external_cancellation(
     job = await asyncio.wait_for(worker, timeout=1.0)
     assert job is not None
     assert job.status == JobStatus.CANCELLED.value
+
+
+async def test_cancellation_between_refresh_and_park_lands_cancelled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """R3 (review): a cancel committed in the window between the worker's
+    post-handler refresh and the park transaction must still be consumed.
+    The worker session's identity-mapped ORM instance carries the pre-cancel
+    attribute snapshot; advance_job must read the flag authoritatively inside
+    the IMMEDIATE transaction, not trust the cached instance."""
+    async with session_factory() as worker_sess:
+        await enqueue_job(
+            worker_sess,
+            job_id="park-race",
+            url="https://www.youtube.com/watch?v=abc",
+            request_fingerprint="key-park-race",
+            config_fingerprint="fp-1",
+            now=1000.0,
+            status=JobStatus.TRANSCRIBING,
+        )
+        job = await claim_job(
+            worker_sess, job_id="park-race", owner="w1", lease_seconds=30.0, now=1000.0
+        )
+        # The worker loop's post-handler refresh (worker.py): the instance is
+        # fresh-looking from THIS moment — a cancel committed afterwards must
+        # not be masked by it.
+        await worker_sess.refresh(job)
+
+        # The cancellation commits in that exact window, from another session.
+        async with session_factory() as api_sess:
+            await request_cancellation(api_sess, job_id="park-race", now=1001.0)
+
+        parked = await advance_job(
+            worker_sess,
+            job_id="park-race",
+            owner="w1",
+            to_status=JobStatus.WAITING_FOR_MODEL,
+            now=1002.0,
+            lease_seconds=30.0,
+        )
+
+    assert parked.status == JobStatus.CANCELLED.value
+    assert parked.error_code == "CANCELLED_BY_USER"
+    assert parked.lease_owner is None
+
+    async with session_factory() as check:
+        row = await get_job(check, job_id="park-race")
+    assert row is not None
+    assert row.status == JobStatus.CANCELLED.value, "no dangling parked job"

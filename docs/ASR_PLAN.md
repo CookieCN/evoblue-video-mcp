@@ -177,7 +177,13 @@ Acceptance:
 - users see network/storage cost before consent;
 - subtitle-only workflows download nothing;
 - an artifact without sufficient use terms cannot enter a production manifest; an unapproved mirror cannot be listed, while `upstream_only` permits only the pinned original publisher URL;
-- archive traversal, undeclared files and decompression bombs are rejected before activation.
+- archive traversal, undeclared files and decompression bombs are rejected before activation;
+- the whitelist is exact in BOTH directions: it must cover **every file member of the pinned
+  archive** (upstream archives ship `README.md`/`LICENSE`/`export-onnx.py`/`test_wavs/` next
+  to the weights) and the install root may contain nested subdirectories. The first real
+  Standard install (feedback #7, 2026-09-10) failed `ARCHIVE_INVALID` precisely because the
+  whitelist listed only the model files — re-pinning an archive must enumerate all members
+  (`scripts/measure_manifest.py`) and keep `sum(files) == installed_size_bytes`.
 
 ### ASR-3 — Tier routing and multilingual fallback
 

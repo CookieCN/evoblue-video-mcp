@@ -6,7 +6,7 @@ owner, and lease expiry, so a SQLite single-writer serializes concurrent access:
 at most one worker wins a claim, and only the current lease holder may advance it.
 """
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -261,6 +261,28 @@ async def advance_job(
 
     validate_transition(JobStatus(job.status), to_status)
 
+    # F4 (feedback #15): a cancel that landed between handler safe-point
+    # checks must not be swallowed by the park. waiting_for_model is a
+    # long-lived state no worker ever claims, so parking with a pending
+    # cancel would resurrect the job on the next install and only cancel it
+    # then — from the user's view, an unexplained cancelled task. Like
+    # mark_cancelled, consuming a user cancel bypasses the transition table.
+    # R3 (review): the flag is read AUTHORITATIVELY here — a column SELECT
+    # inside the IMMEDIATE transaction — because ``job`` may be an
+    # identity-mapped instance whose attributes were loaded BEFORE this
+    # transaction began (expire_on_commit=False keeps it looking fresh), and
+    # a cancellation committed in that window must still be consumed.
+    pending_cancel = (
+        await session.execute(
+            select(Job.cancel_requested_at).where(Job.id == job.id)
+        )
+    ).scalar_one_or_none()
+    cancel_landed = (
+        to_status is JobStatus.WAITING_FOR_MODEL and pending_cancel is not None
+    )
+    if cancel_landed:
+        to_status = JobStatus.CANCELLED
+
     new_stage = job.stage
     if stage is not None:
         new_stage = stage.value
@@ -271,7 +293,7 @@ async def advance_job(
         "status": to_status.value,
         "stage": new_stage,
         "progress": job.progress if progress is None else progress,
-        "error_code": None,
+        "error_code": "CANCELLED_BY_USER" if cancel_landed else None,
         "error_detail": None,
         "retryable": False,
         "updated_at": now,
@@ -321,6 +343,39 @@ async def fail_exhausted_retries(session: AsyncSession, *, now: float) -> list[J
             lease_owner=None,
             lease_expires_at=None,
             next_retry_at=None,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    ids = list(result.scalars().all())
+    await session.commit()
+    if not ids:
+        return []
+    return list((await session.scalars(select(Job).where(Job.id.in_(ids)))).all())
+
+
+async def land_dangling_cancellations(session: AsyncSession, *, now: float) -> list[Job]:
+    """Land parked jobs carrying an unconsumed cancel flag as ``cancelled``.
+
+    F4 (feedback #15): only pre-F4 versions could park a job into
+    waiting_for_model while ``cancel_requested_at`` was set; the park
+    transaction now consumes the flag itself. This sweep is the
+    migration-safe consumer for rows that already exist when an old database
+    meets the new engine.
+    """
+    await _begin_immediate(session)
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.status == JobStatus.WAITING_FOR_MODEL.value,
+            Job.cancel_requested_at.is_not(None),
+        )
+        .values(
+            status=JobStatus.CANCELLED.value,
+            error_code="CANCELLED_BY_USER",
+            retryable=False,
+            lease_owner=None,
+            lease_expires_at=None,
             updated_at=now,
         )
         .returning(Job.id)
@@ -389,27 +444,74 @@ async def list_jobs(
     limit: int,
     offset: int,
     status: JobStatus | None = None,
+    status_group: str | None = None,
+    platform: str | None = None,
+    query: str | None = None,
 ) -> tuple[list[Job], int]:
-    """Return a page of jobs and the total count matching the optional status filter."""
+    """Return a page of jobs and the total count matching the filters.
+
+    ``platform`` (case-insensitive exact) and ``query`` (case-insensitive
+    substring over title/url, url is the pre-metadata fallback) run
+    server-side (R4, review) so pagination and total come from one filtered
+    collection — the bridge no longer slices a locally filtered window.
+    ``status_group='non_completed'`` (R4b, review round 2) pages every
+    non-completed row — the default merge view's first segment — through the
+    same server-side paging.
+    """
     filters: list[ColumnElement[bool]] = []
     if status is not None:
         filters.append(Job.status == status.value)
+    if status_group == "non_completed":
+        filters.append(Job.status != JobStatus.COMPLETED.value)
+    if platform is not None and platform.strip():
+        filters.append(func.lower(Job.platform) == platform.strip().lower())
+    if query is not None and query.strip():
+        needle = f"%{_escape_like(query.strip())}%"
+        filters.append(
+            or_(
+                Job.title.ilike(needle, escape="\\"),
+                Job.url.ilike(needle, escape="\\"),
+            )
+        )
 
     total = (
         await session.scalar(select(func.count()).select_from(Job).where(*filters))
     ) or 0
+    # R7 (review round 3): the contract order is 运行中 → failed/cancelled →
+    # 报告历史 — ACTIVE rows must precede terminal ones regardless of age (a
+    # newer failed job must not overtake an older still-running one).
+    # created_at desc is the in-group order; the unique id tiebreak keeps
+    # pagination deterministic under identical timestamps.
+    terminal_rank = case(
+        (
+            Job.status.in_(
+                [
+                    JobStatus.COMPLETED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                ]
+            ),
+            1,
+        ),
+        else_=0,
+    )
     jobs = list(
         (
             await session.scalars(
                 select(Job)
                 .where(*filters)
-                .order_by(Job.created_at.desc(), Job.id.desc())
+                .order_by(terminal_rank.asc(), Job.created_at.desc(), Job.id.desc())
                 .offset(offset)
                 .limit(limit)
             )
         ).all()
     )
     return jobs, int(total)
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards so a user query matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 async def get_app_settings(session: AsyncSession) -> AppSettings | None:
@@ -474,13 +576,20 @@ async def list_waiting_model_ids(session: AsyncSession) -> list[str]:
 async def resume_waiting_jobs(
     session: AsyncSession, *, model_id: str, now: float
 ) -> list[str]:
-    """Resume jobs waiting for an explicitly installed model."""
+    """Resume jobs waiting for an explicitly installed model.
+
+    F4 (feedback #15): rows with an unconsumed cancel flag are skipped — a
+    job the user asked to cancel must never be resurrected into a running
+    stage. (The park transaction and the startup sweep keep such rows from
+    existing; this guard is the last line of defense.)
+    """
     await _begin_immediate(session)
     result = await session.execute(
         update(Job)
         .where(
             Job.status == JobStatus.WAITING_FOR_MODEL.value,
             Job.asr_recommendation_model_id == model_id,
+            Job.cancel_requested_at.is_(None),
         )
         .values(
             status=JobStatus.TRANSCRIBING.value,
@@ -510,6 +619,7 @@ async def save_app_settings(
     llm_base_url: str | None = None,
     llm_model: str | None = None,
     llm_credential_ref: str | None = None,
+    llm_credential_origin: str | None = None,
     asr_provider: str | None = None,
     whisper_cpp_executable: str | None = None,
     commit: bool = True,
@@ -536,6 +646,7 @@ async def save_app_settings(
     settings.llm_base_url = llm_base_url
     settings.llm_model = llm_model
     settings.llm_credential_ref = llm_credential_ref
+    settings.llm_credential_origin = llm_credential_origin
     settings.asr_provider = asr_provider
     settings.whisper_cpp_executable = whisper_cpp_executable
     settings.updated_at = now

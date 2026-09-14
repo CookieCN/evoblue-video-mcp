@@ -53,3 +53,34 @@ def test_manifest_digests_are_well_formed_and_consistent() -> None:
         assert all(len(f.sha256) == 64 for f in manifest.files)
         assert all(len(s.sha256) == 64 for s in manifest.sources)
         assert len({s.sha256 for s in manifest.sources}) == 1
+
+
+def test_archive_whitelists_cover_every_pinned_archive_member() -> None:
+    """F2 (feedback #7): the extractor rejects undeclared members, and the
+    first real install died on README.md — the whitelist must mirror the
+    FULL file list of the pinned archive (verified 2026-09-10 against the
+    archives whose sha256 is pinned in the manifests)."""
+    standard = get_builtin_manifest("sensevoice-small-int8")
+    assert standard is not None
+    assert {f.name for f in standard.files} == {
+        "LICENSE",
+        "README.md",
+        "export-onnx.py",
+        "model.int8.onnx",
+        "tokens.txt",
+        "test_wavs/en.wav",
+        "test_wavs/ja.wav",
+        "test_wavs/ko.wav",
+        "test_wavs/yue.wav",
+        "test_wavs/zh.wav",
+    }
+    lite = get_builtin_manifest("zipformer-ctc-small-zh-int8")
+    assert lite is not None
+    assert {f.name for f in lite.files} == {
+        "bbpe.model",
+        "model.int8.onnx",
+        "tokens.txt",
+        "test_wavs/0.wav",
+        "test_wavs/1.wav",
+        "test_wavs/8k.wav",
+    }

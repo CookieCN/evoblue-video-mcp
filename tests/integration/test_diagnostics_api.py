@@ -161,3 +161,23 @@ async def test_diagnostics_export_is_redacted_attachment(
     assert "llm:deepseek" not in r.text, "credential reference must be omitted"
     assert settings_view["llm_base_url_host"] == "api.deepseek.com"
     assert "index" in payload and "open_issues" in payload["index"]
+    # F0: the export reports the expected engine-log location only when a data
+    # directory is known; here create_app got none.
+    assert settings_view["engine_log_file"] is None
+
+
+async def test_diagnostics_export_reports_engine_log_location(
+    session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """F0 (ENGINE_LOGGING.md §6): redacted location hint, no absolute path."""
+    from evoblue_video_mcp.engine_logging import LOG_DIRNAME, LOG_FILENAME
+
+    app = create_app(
+        session_factory=session_factory, local_token=_TOKEN, data_directory=tmp_path
+    )
+    async with _client(app) as client:
+        r = await client.get("/api/diagnostics/export", headers={"X-Local-Token": _TOKEN})
+    assert r.status_code == 200
+    settings_view = r.json()["settings"]
+    assert settings_view["engine_log_file"] == f".../{LOG_DIRNAME}/{LOG_FILENAME}"
+    assert str(tmp_path) not in r.text
