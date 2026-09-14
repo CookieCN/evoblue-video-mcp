@@ -11,6 +11,7 @@
 # Model weights are NEVER bundled in either variant (ASR_PLAN section 3).
 
 import os
+from importlib.metadata import PackageNotFoundError, distribution
 
 from PyInstaller.utils.hooks import copy_metadata
 
@@ -20,14 +21,31 @@ if variant not in ("base", "full"):
 
 is_full = variant == "full"
 
+
+def _copy_metadata_if_present(name: str) -> list:
+    """Copy a package's dist-info when the build env actually has it.
+
+    ``onnxruntime`` is a declared dependency only on Windows
+    (``sys_platform == 'win32'`` in pyproject: sherpa-onnx links its own
+    runtime elsewhere) — an unconditional ``copy_metadata("onnxruntime")``
+    raises PackagingError on the Linux/macOS build runners and kills their
+    full-variant builds. Presence-checked copies mirror the environment.
+    """
+    try:
+        distribution(name)
+    except PackageNotFoundError:
+        return []
+    return copy_metadata(name)
+
+
 datas = []
 # Diagnostics read versions via importlib.metadata; frozen builds have no
 # site-packages dist-info unless it is copied in (feedback #1/#5: without
 # this a perfectly working yt-dlp/ASR runtime diagnosed as "not installed").
-datas += copy_metadata("yt-dlp")
+datas += _copy_metadata_if_present("yt-dlp")
 if is_full:
-    datas += copy_metadata("sherpa-onnx")
-    datas += copy_metadata("onnxruntime")
+    datas += _copy_metadata_if_present("sherpa-onnx")
+    datas += _copy_metadata_if_present("onnxruntime")
 hiddenimports = [
     # uvicorn's dynamically-selected pieces (uvicorn[standard])
     "uvicorn.logging",
