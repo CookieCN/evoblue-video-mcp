@@ -1,6 +1,7 @@
 """Production Local Engine assembly and FastAPI worker lifecycle."""
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
@@ -34,6 +35,8 @@ from evoblue_video_mcp.storage.models import AppSettings
 from evoblue_video_mcp.storage.rebuild import IndexRebuildService
 from evoblue_video_mcp.storage.repository import LeaseLostError, get_app_settings
 from evoblue_video_mcp.web.app import create_app
+
+logger = logging.getLogger(__name__)
 
 HandlerFactory = Callable[
     [AppSettings | None], Awaitable[Mapping[JobStatus, StageHandler] | None]
@@ -141,6 +144,14 @@ async def run_runtime_worker_loop(
                 )
             except LeaseLostError:
                 continue
+            except Exception:
+                # One poisoned iteration must not kill the loop for every
+                # other job: run_worker_once marks its own job failed whenever
+                # the database is reachable, so log and keep serving.
+                logger.exception("worker iteration crashed unexpectedly")
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=idle_sleep)
+                continue
         if job is None:
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=idle_sleep)
@@ -225,6 +236,19 @@ def create_runtime_app(
                 handler_factory=handlers,
             )
         )
+
+        def _log_worker_termination(task: "asyncio.Task[None]") -> None:
+            # The loop swallows per-iteration failures; reaching here means it
+            # exited entirely, and a silent exit strands every queued job.
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.error(
+                    "worker loop terminated unexpectedly: %s", type(exc).__name__
+                )
+
+        worker.add_done_callback(_log_worker_termination)
         try:
             yield
         finally:

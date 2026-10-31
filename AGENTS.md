@@ -7,7 +7,8 @@
 ## 当前阶段
 
 - 初始化日期：2026-08-24
-- 当前阶段：**P7 + P8 + ASR-5 已交付（2026-09-08），版本 0.9.0b5，全阶段功能 62/62 done**。P7：Windows 用户级安装器 + 便携 zip + Release 通道（合同 docs/INSTALLER_RELEASE_CONTRACT.md + ADR 0006；frozen=production、token fragment 引导、SPA catch-all、单实例退出码 3/4、引擎 exe bridge 子命令打包入口、迁移前 SQLite backup 快照、Inno Setup 真机验收 16/16、release.yml 草稿制发布）。P8：docs/HARDENING_MATRIX.md 15 行失败模式到护栏、worker_runtime 诊断检查 + 首页排队横幅、脱敏诊断导出、故障注入回归、docs/SUPPORT.md。ASR-5：可选 Qwen3-ASR 国内文件集安装。发布由 Owner 手动执行：bump 版本、push tag、CI 出草稿、审阅发布。
+- 当前阶段：**真机 ASR 静默冻结修复已交付（2026-10-31，源码 main，未 bump 版本）**——Owner 真机首用暴露 worker 五层缺陷链（泄漏写锁→心跳死亡→异常穿透→循环静默死亡→attempt 耗尽僵尸），五层修复 + 六反例翻转 + harness 端到端 152s 出首份报告；详见 `.agents/progress.md` 与 Gotcha #10。此前：0.9.0-beta.6 已发布（2026-09-15，首位试用者 16 项反馈修复 + 八轮评审）。
+- 前一阶段：**P7 + P8 + ASR-5 已交付（2026-09-08），版本 0.9.0b5，全阶段功能 62/62 done**。P7：Windows 用户级安装器 + 便携 zip + Release 通道（合同 docs/INSTALLER_RELEASE_CONTRACT.md + ADR 0006；frozen=production、token fragment 引导、SPA catch-all、单实例退出码 3/4、引擎 exe bridge 子命令打包入口、迁移前 SQLite backup 快照、Inno Setup 真机验收 16/16、release.yml 草稿制发布）。P8：docs/HARDENING_MATRIX.md 15 行失败模式到护栏、worker_runtime 诊断检查 + 首页排队横幅、脱敏诊断导出、故障注入回归、docs/SUPPORT.md。ASR-5：可选 Qwen3-ASR 国内文件集安装。发布由 Owner 手动执行：bump 版本、push tag、CI 出草稿、审阅发布。
 - P1–P4 已完成：SQLite Job 模型、版本化迁移、单 Worker 租约、崩溃恢复、字幕分析闭环、历史/FTS5/索引重建、STDIO MCP Bridge（七工具、信封统一、错误翻译矩阵、真实握手与多客户端幂等验收）；P6/ASR 全链路完成，Standard 已过审为正式默认模型。
 
 ## Owner Context
@@ -49,6 +50,7 @@
 | 7 | Git Bash（MSYS）在 Windows 下会把传给子进程/heredoc 的反斜杠路径改写成正斜杠（`f:\x\y` → `f://x/y` 或 `f:/x/y`）；WorkBuddy 接入时曾三次写入失败 | 让 Python 写 Windows 路径时，路径字面量用 `chr(92)` 拼接或经环境变量/JSON 传入，不经过 bash 字面转义；写入后必须回读实际字节验证。项目自身的脚本（`scripts/verify_p4_clients.py`）不经 bash 改写路径，优先用它们。 |
 | 8 | Windows Defender 会把未签名的 PyInstaller 引擎 exe 云判定为含病毒并隔离（2026-09-07 实测 WinError 225，两次隔离验收临时目录里的引擎 exe，真机验收中途翻车）；随后对该 exe 的 `subprocess` 直接抛 OSError | 本机构建/验收先加窄域排除（管理员）：`Add-MpPreference -ExclusionPath` 指向仓库 dist 与验收临时目录；`scripts/verify_release.py` 步骤 3 无真实模型时显式 SKIP 而非栈崩溃；用户侧被拦按 `docs/SUPPORT.md` 放行 + SHA256 核对。验收脚本对环境敏感断言（如 mutex 冲突码）必须密闭化（monkeypatch `acquire_mutex`），否则会被机器上其他 EvoBlue 实例的合法 mutex 干扰成假失败。 |
 | 9 | 评审轮抓到两类验证环境陷阱：①`Start-Process` 禁止把 stdout/stderr 重定向到同一文件（命令在进程启动前直接报错，CI smoke 必须用两个日志文件）；②真机验收脚本与 pytest 并行运行时，验收引擎持有真 mutex，会让门禁里的双开子进程测试拿不到锁而超时假失败 | CI 冒烟的 PowerShell 重定向永远分开两文件；真 mutex/真端口的测试与验收脚本（`verify_p7_acceptance.py`、`verify_release.py`）一律串行执行；发布 tag 校验不得做裸字符串比较（`0.9.0-beta.1` ≠ `0.9.0b1`），必须走 `scripts/check_release_tag.py` 的 npm 归一化（行为测试锁定） |
+| 10 | 真机 ASR 转写静默冻结五层链（2026-10-31）：`save_artifact_inline` 已存在分支早退泄漏未提交 IMMEDIATE 事务（写锁持到阶段结束）→ 心跳续约撞锁死亡 → `await heartbeat` 把心跳裸异常重放出兜底 except → worker 循环只捕 `LeaseLostError` 整体静默死亡 → 耗尽 attempt 的 running 态任务永久僵尸（重启即烧 attempt，三次 brick） | 自持事务写函数**每个出口**必须 commit/rollback（AST 守卫只查入口，早退分支最易漏）；辅助任务（心跳）死亡必须被宿主收尸容纳（`_reap_heartbeat`：意外异常记录后吞、LeaseLostError 传播）；顶层循环兜底 `Exception` + 日志 + 继续；恢复矩阵按「不可再领取的状态」穷举（`fail_exhausted_retries` 须盖 running 态耗尽行）。诊断三件套：py-spy 全 idle 栈（零计算=死非慢）+ DB `lease_expires_at` 推进（心跳活性）+ 独立进程 harness 重放（隔离 provider 与装配层）。反例锁定：`tests/integration/test_worker_freeze_fix.py`。 |
 
 ## Architecture Decisions
 

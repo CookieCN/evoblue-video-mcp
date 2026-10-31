@@ -7,12 +7,14 @@ units of work. The loop uses a real clock by default, injectable for tests.
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from evoblue_video_mcp.jobs import TERMINAL_JOB_STATUSES, JobStatus
@@ -29,6 +31,8 @@ from evoblue_video_mcp.storage.repository import (
     mark_failure,
     renew_lease,
 )
+
+logger = logging.getLogger(__name__)
 
 MISSING_HANDLER_ERROR = "INTERNAL_ERROR"
 DEFAULT_RETRY_DELAY = 60.0
@@ -211,7 +215,7 @@ async def run_worker_once(
                 handler = handlers.get(status)
                 if handler is None:
                     heartbeat_stop.set()
-                    await heartbeat
+                    await _reap_heartbeat(heartbeat)
                     async with immediate_write_transaction(sess):
                         await mark_failure(
                             sess,
@@ -231,7 +235,7 @@ async def run_worker_once(
                     outcome = await handler.execute(job, sess, ctx)
                 except Exception as exc:
                     heartbeat_stop.set()
-                    await heartbeat
+                    await _reap_heartbeat(heartbeat)
                     # CancelledError is not an Exception, so shutdown still propagates.
                     await sess.rollback()  # discard the handler's failed transaction
                     async with immediate_write_transaction(sess):
@@ -246,7 +250,7 @@ async def run_worker_once(
                         )
                     break
                 heartbeat_stop.set()
-                await heartbeat
+                await _reap_heartbeat(heartbeat)
                 await sess.refresh(job)
 
                 if outcome.error_code == "CANCELLED_BY_USER":
@@ -334,7 +338,7 @@ async def run_worker_once(
                 )
         finally:
             heartbeat_stop.set()
-            await heartbeat
+            await _reap_heartbeat(heartbeat)
 
         return await get_job(sess, job_id=job.job_id)
 
@@ -348,7 +352,14 @@ async def _heartbeat_lease(
     now: Callable[[], float],
     stop: asyncio.Event,
 ) -> None:
-    """Renew a job lease in a separate session while a handler is running."""
+    """Renew a job lease in a separate session while a handler is running.
+
+    A renewal that loses a write-lock race for longer than busy_timeout
+    (``database is locked``) must not kill the heartbeat: correctness is
+    guarded by the lease check on every worker write, so the renewal retries
+    on the next interval and the loop only gives up once the lease genuinely
+    lapses (``renew_lease`` returns False).
+    """
     interval = lease_seconds / 3
     while True:
         try:
@@ -356,16 +367,35 @@ async def _heartbeat_lease(
             return
         except TimeoutError:
             pass
-        async with session_factory() as heartbeat_session:
-            renewed = await renew_lease(
-                heartbeat_session,
-                job_id=job_id,
-                owner=owner,
-                now=now(),
-                lease_seconds=lease_seconds,
+        try:
+            async with session_factory() as heartbeat_session:
+                renewed = await renew_lease(
+                    heartbeat_session,
+                    job_id=job_id,
+                    owner=owner,
+                    now=now(),
+                    lease_seconds=lease_seconds,
+                )
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "lease renewal deferred (%s); retrying next interval",
+                type(exc).__name__,
             )
+            continue
         if not renewed:
             return
+
+
+async def _reap_heartbeat(heartbeat: "asyncio.Task[None]") -> None:
+    """Await a stopped heartbeat without letting its unexpected death replace
+    the worker's own outcome: the lease guard on the next worker write is the
+    authority, a crashed heartbeat task is only a symptom and gets logged."""
+    try:
+        await heartbeat
+    except LeaseLostError:
+        raise
+    except Exception as exc:
+        logger.error("lease heartbeat died unexpectedly: %s", type(exc).__name__)
 
 
 async def run_worker_loop(

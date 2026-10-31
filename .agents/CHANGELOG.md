@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.0-beta.7] — 2026-10-31
+
+### Fixed
+
+- 真机 ASR 转写静默冻结修复（2026-10-31，五层缺陷链，Owner 真机首报）：`save_artifact_inline` 已存在分支泄漏未提交 IMMEDIATE 事务——阶段会话持 SQLite 写锁到阶段结束，心跳续约 `BEGIN IMMEDIATE` 撞锁超时死亡，`await heartbeat` 把心跳裸 `OperationalError` 重放出逃逸，worker 循环只捕 `LeaseLostError` 整体静默死亡，任务冻结 running 态且每次重启烧一个 attempt 至永久僵尸。修复五层：①真 upsert（刷新 payload，断点恢复合同实际生效——旧实现首个分段后 checkpoint 永不更新）+ 每个出口闭合事务；②心跳瞬时锁冲突下个间隔重试不死亡；③`_reap_heartbeat` 收尸容纳意外异常（LeaseLostError 仍传播）；④`run_runtime_worker_loop` 兜底 Exception + 日志 + 继续 + lifespan 意外终止日志；⑤`fail_exhausted_retries` 扩展到耗尽 attempt 的 running 态僵尸。新增 `tests/integration/test_worker_freeze_fix.py` 六反例（旧码 6 红 → 修复 6 绿翻转验证）；harness 真实 DB 快照端到端重放 + 真机验证：B 站 23 分钟视频提交→转写（90 段）→DeepSeek→Markdown 首报告全程无人工干预，僵尸任务重启自动落 failed/MAX_ATTEMPTS_EXCEEDED，中文 FTS 检索命中。全量 815 passed + 7 skipped（两轮 exit 0）+ ruff + mypy strict 103。经验沉淀 experience #51、AGENTS Gotcha #10。
+
 ## [0.9.0-beta.6] — 2026-09-14
 
 ### Fixed

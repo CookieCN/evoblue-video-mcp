@@ -411,10 +411,46 @@
           "status": "done"
         }
       ]
+    },
+    "fix_worker_freeze": {
+      "name": "Real-machine ASR silent-freeze fix (2026-10-31, five-layer worker defect chain)",
+      "status": "done",
+      "features": [
+        {
+          "id": "WF-1",
+          "name": "save_artifact_inline true upsert + every-exit transaction close (root cause: stranded IMMEDIATE txn held DB write lock for whole stage; checkpoint payloads never refreshed)",
+          "status": "done"
+        },
+        {
+          "id": "WF-2",
+          "name": "Heartbeat survives transient lock (database is locked) by retrying next interval",
+          "status": "done"
+        },
+        {
+          "id": "WF-3",
+          "name": "_reap_heartbeat containment: unexpected heartbeat death logged, LeaseLostError still propagates",
+          "status": "done"
+        },
+        {
+          "id": "WF-4",
+          "name": "run_runtime_worker_loop catches unexpected exceptions (log + continue) + lifespan termination logging",
+          "status": "done"
+        },
+        {
+          "id": "WF-5",
+          "name": "fail_exhausted_retries covers running-state zombies (attempt>=max unclaimable forever)",
+          "status": "done"
+        },
+        {
+          "id": "WF-6",
+          "name": "Six regression counterexamples with red->green flip verification + harness end-to-end replay (Bilibili 23min video, 152s to first Markdown report)",
+          "status": "done"
+        }
+      ]
     }
   },
   "summary": {
-    "done": 69,
+    "done": 75,
     "in_progress": 0,
     "planned": 0,
     "completion_pct": 100.0

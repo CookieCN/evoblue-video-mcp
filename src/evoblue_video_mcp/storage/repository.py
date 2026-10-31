@@ -328,12 +328,18 @@ async def advance_job(
 
 
 async def fail_exhausted_retries(session: AsyncSession, *, now: float) -> list[Job]:
-    """Atomically move retry_wait jobs whose attempts are exhausted into ``failed``."""
+    """Fail jobs whose attempts are exhausted: ``retry_wait`` rows, plus
+    running rows stranded past their final claim — a running stage can never
+    be claimed again once ``attempt >= max_attempts``, so recovery must land
+    them in ``failed`` instead of leaving an unclaimable zombie."""
     await _begin_immediate(session)
     result = await session.execute(
         update(Job)
         .where(
-            Job.status == JobStatus.RETRY_WAIT.value,
+            or_(
+                Job.status == JobStatus.RETRY_WAIT.value,
+                Job.status.in_(_RUNNING_VALUES),
+            ),
             Job.attempt >= Job.max_attempts,
         )
         .values(
@@ -822,7 +828,14 @@ async def save_artifact_inline(
     schema_version: int,
     payload_json: str,
 ) -> None:
-    """Persist a checkpoint only while the caller still holds a live lease."""
+    """Persist (insert or refresh) a checkpoint while the caller still holds a live lease.
+
+    Checkpoint payloads grow as the stage progresses, so an existing artifact
+    row is refreshed, not skipped. Every exit commits or rolls back: an open
+    IMMEDIATE transaction left behind here holds the database write lock for
+    the rest of a long stage and starves the lease heartbeat into
+    ``database is locked``.
+    """
     await _begin_immediate(session)
     lease_guard = await session.execute(
         update(Job)
@@ -843,20 +856,25 @@ async def save_artifact_inline(
         session, job_id=job_id, artifact_type=artifact_type, input_fingerprint=input_fingerprint
     )
     if existing is not None:
-        return
-    session.add(
-        JobArtifact(
-            job_id=job_id,
-            stage=stage,
-            artifact_type=artifact_type,
-            input_fingerprint=input_fingerprint,
-            schema_version=schema_version,
-            storage_kind="inline_json",
-            payload_json=payload_json,
-            created_at=now,
-            updated_at=now,
+        await session.execute(
+            update(JobArtifact)
+            .where(JobArtifact.id == existing.id)
+            .values(payload_json=payload_json, updated_at=now)
         )
-    )
+    else:
+        session.add(
+            JobArtifact(
+                job_id=job_id,
+                stage=stage,
+                artifact_type=artifact_type,
+                input_fingerprint=input_fingerprint,
+                schema_version=schema_version,
+                storage_kind="inline_json",
+                payload_json=payload_json,
+                created_at=now,
+                updated_at=now,
+            )
+        )
     await session.commit()
 
 
